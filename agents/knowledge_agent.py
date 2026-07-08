@@ -217,7 +217,7 @@ def _extract_answer_from_context(query: str, hits: list[dict], sources: list[str
     return "\n".join(answer_lines)
 
 
-def run_knowledge_agent(query: str, top_k: int = 5) -> dict:
+def run_knowledge_agent(query: str, top_k: int = 8) -> dict:
     """Answer a policy/regulation/syllabus question using TF-IDF RAG."""
     from db_storage import list_knowledge_files
 
@@ -257,14 +257,17 @@ def run_knowledge_agent(query: str, top_k: int = 5) -> dict:
     prompt = ChatPromptTemplate.from_messages([
         (
             "system",
-            "You are an academic policy expert for a university department. "
-            "Answer the question using ONLY the provided document context. "
-            "Be direct and concise. Use bullet points for lists. "
-            "Start your answer immediately — no preamble. "
-            "If the answer is not in the context, say exactly: "
-            "'This information is not available in the uploaded documents.'",
+            "You are an academic policy expert for a university department.\n"
+            "Answer the EXACT question asked using ONLY the document context provided.\n"
+            "Rules:\n"
+            "1. Answer directly — no preamble, no 'Based on the document...' intro.\n"
+            "2. Use bullet points for multi-part answers.\n"
+            "3. Include specific numbers, percentages, or rules mentioned in the text.\n"
+            "4. If the answer is truly not in the context, say: "
+            "'This specific information is not in the uploaded documents.'\n"
+            "5. Never make up information not in the context.",
         ),
-        ("human", "Document context:\n{context}\n\nQuestion: {query}"),
+        ("human", "Question: {query}\n\nDocument context:\n{context}\n\nAnswer:"),
     ])
 
     answer = fallback_answer

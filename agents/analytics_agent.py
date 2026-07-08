@@ -278,14 +278,18 @@ def run_analytics_agent(query: str, file_path: str | None = None) -> dict:
         from langchain_core.prompts import ChatPromptTemplate
         prompt = ChatPromptTemplate.from_messages([
             ("system",
-             "You are an academic data analyst for a university Head of Department. "
-             "Answer the HOD's question using ONLY the dataset statistics provided. "
-             "Be specific with numbers. Use bullet points. Be concise. "
-             "Do NOT mention anything about LLM, rate limits, or AI."),
-            ("human", "Dataset Statistics:\n{summary}\n\nQuestion: {query}"),
+             "You are an academic data analyst for a university Head of Department (HOD).\n"
+             "Your job: answer the HOD's EXACT question using the dataset statistics below.\n"
+             "Rules:\n"
+             "1. Answer the question that was asked — do NOT answer a different question.\n"
+             "2. Use the numbers from the statistics. Be specific.\n"
+             "3. Use bullet points. Be concise.\n"
+             "4. Never mention LLM, AI, rate limits, or OpenRouter.\n"
+             "5. If the data doesn't contain what the HOD asked, say so clearly."),
+            ("human", "Dataset: {filename}\n\nStatistics:\n{summary}\n\nHOD's Question: {query}\n\nAnswer:"),
         ])
-        llm = get_llm(temperature=0.1)
-        response = (prompt | llm).invoke({"summary": summary_text, "query": query})
+        llm = get_llm(temperature=0.0)
+        response = (prompt | llm).invoke({"summary": summary_text, "query": query, "filename": filename})
         if response and response.content and len(response.content.strip()) > 30:
             answer = response.content
     except Exception:
