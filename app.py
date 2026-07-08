@@ -23,8 +23,9 @@ try:
 except ImportError as e:
     raise ImportError("Plotly is required for visualizations. Install with 'pip install plotly'") from e
 
-from config import OPENROUTER_MODEL, ANALYTICS_DATA_DIR, DOCUMENTS_DIR
+from config import OPENROUTER_MODEL
 from auth import auth_gate
+import db_storage
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -549,29 +550,40 @@ auth_gate()
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
-def load_df(path: str) -> pd.DataFrame:
-    p = Path(path)
-    return pd.read_csv(p) if p.suffix.lower() == ".csv" else pd.read_excel(p)
+def load_df(filename: str) -> pd.DataFrame:
+    """Load a dataframe from DB by filename."""
+    import io
+    content = db_storage.load_analytics_file(filename)
+    if content is None:
+        raise FileNotFoundError(f"File '{filename}' not found in database.")
+    buf = io.BytesIO(content)
+    p = Path(filename)
+    return pd.read_csv(buf) if p.suffix.lower() == ".csv" else pd.read_excel(buf)
 
 def get_datasets() -> list[str]:
-    d = Path(ANALYTICS_DATA_DIR)
-    if not d.exists(): return []
-    return [str(f) for f in sorted(d.iterdir())
-            if f.suffix.lower() in (".csv",".xlsx",".xls") and not f.name.startswith(".")]
+    """Return list of analytics filenames stored in DB."""
+    try:
+        return [row["filename"] for row in db_storage.list_analytics_files()]
+    except Exception:
+        return []
 
 def get_doc_list() -> list[str]:
-    d = Path(DOCUMENTS_DIR)
-    if not d.exists(): return []
-    return [f.name for f in sorted(d.iterdir())
-            if f.suffix.lower() in (".pdf",".txt",".md") and not f.name.startswith(".")]
+    """Return list of knowledge document filenames stored in DB."""
+    try:
+        return db_storage.list_knowledge_files()
+    except Exception:
+        return []
 
 def get_chunk_count() -> int:
     try:
         import json
-        p = Path(DOCUMENTS_DIR).parent / "chroma_db" / "tfidf_index.json"
-        if not p.exists(): return 0
-        return json.load(open(p)).get("N", 0)
-    except: return 0
+        from db_storage import load_tfidf_index
+        raw = load_tfidf_index()
+        if raw is None:
+            return 0
+        return json.loads(raw).get("N", 0)
+    except:
+        return 0
 
 def compute_stats(df: pd.DataFrame) -> dict:
     stats = {}
@@ -699,8 +711,7 @@ with st.sidebar:
         st.caption("CSV/Excel → Analytics Agent")
         up_csv = st.file_uploader("", type=["csv","xlsx","xls"], key="up_csv", label_visibility="collapsed")
         if up_csv:
-            Path(ANALYTICS_DATA_DIR).mkdir(parents=True, exist_ok=True)
-            (Path(ANALYTICS_DATA_DIR) / up_csv.name).write_bytes(up_csv.getbuffer())
+            db_storage.save_analytics_file(up_csv.name, up_csv.getbuffer().tobytes())
             st.success(f"✅ {up_csv.name}")
 
     st.markdown('<div class="sidebar-gap"></div>', unsafe_allow_html=True)
@@ -710,8 +721,7 @@ with st.sidebar:
         st.caption("PDF/TXT → Knowledge Base Agent")
         up_doc = st.file_uploader("", type=["pdf","txt"], key="up_doc", label_visibility="collapsed")
         if up_doc:
-            Path(DOCUMENTS_DIR).mkdir(parents=True, exist_ok=True)
-            (Path(DOCUMENTS_DIR) / up_doc.name).write_bytes(up_doc.getbuffer())
+            db_storage.save_knowledge_file(up_doc.name, up_doc.getbuffer().tobytes())
             st.success(f"✅ {up_doc.name} saved")
             st.info("👆 Click 'Re-index' below to make it searchable")
 
@@ -816,7 +826,7 @@ if st.session_state.nav_page == "home":
     with d1:
         datasets = get_datasets()
         if datasets:
-            dataset_items = "".join([f'<div class="data-item">✅ {Path(d).name}</div>' for d in datasets])
+            dataset_items = "".join([f'<div class="data-item">✅ {d}</div>' for d in datasets])
             st.markdown(f'<div class="data-card"><h4>📊 Datasets Ready</h4>{dataset_items}</div>', unsafe_allow_html=True)
         else:
             st.warning("No datasets uploaded yet. Upload CSV/Excel from sidebar.")
@@ -847,12 +857,12 @@ elif st.session_state.nav_page == "chat":
         c1, c2, c3 = st.columns([2, 2, 1])
         with c1:
             all_ds = get_datasets()
-            ds_opts = ["Auto"] + [Path(d).name for d in all_ds]
+            ds_opts = ["Auto"] + all_ds
             chosen_ds = st.selectbox("📂 Target Dataset", ds_opts, key="chat_ds",
                                      help="For analytics queries — selects which file to analyze")
             fp = None
             if chosen_ds != "Auto":
-                fp = next((d for d in all_ds if Path(d).name == chosen_ds), None)
+                fp = chosen_ds  # filename only
         with c2:
             url_in = st.text_input("🌐 Website URL", placeholder="https://...", key="chat_url",
                                    help="For website testing only")
@@ -914,7 +924,7 @@ elif st.session_state.nav_page == "chat":
                            ("CGPA", stats.get("avg_cgpa","—"))]
                     for c,(l,v) in zip(cols,kvs): c.metric(l,v)
                 if result.get("file_used"):
-                    st.caption(f"📂 Source: `{Path(result['file_used']).name}`")
+                    st.caption(f"📂 Source: `{result['file_used']}`")
 
             elif intent == "knowledge":
                 with st.container(border=True):
@@ -941,9 +951,9 @@ elif st.session_state.nav_page == "analytics":
     if not all_ds:
         st.info("📂 No datasets found. Upload a CSV or Excel file from the sidebar.")
     else:
-        ds_names = [Path(d).name for d in all_ds]
-        chosen_name = st.selectbox("Select dataset", ds_names, key="ana_ds")
-        chosen_path = all_ds[ds_names.index(chosen_name)]
+        ds_names = [Path(d).name for d in all_ds] if all_ds and Path(all_ds[0]).is_absolute() else all_ds
+        chosen_name = st.selectbox("Select dataset", ds_names if ds_names else all_ds, key="ana_ds")
+        chosen_path = chosen_name  # filename only — load_df reads from DB
 
         try:
             df = load_df(chosen_path)

@@ -11,12 +11,16 @@ load_dotenv()
 # ── OpenRouter ───────────────────────────────────────────────────────────────
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
-# ── Storage ──────────────────────────────────────────────────────────────────
-CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma_db")
-ANALYTICS_DATA_DIR: str = os.getenv("ANALYTICS_DATA_DIR", "./data/analytics")
-DOCUMENTS_DIR: str = os.getenv("DOCUMENTS_DIR", "./data/documents")
+# ── Database ─────────────────────────────────────────────────────────────────
+DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+
+# ── Storage (local temp dirs used only for in-memory processing) ─────────────
+# On Render these are ephemeral /tmp paths — all persistent data goes to Neon DB
+CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "/tmp/deptops/chroma_db")
+ANALYTICS_DATA_DIR: str = os.getenv("ANALYTICS_DATA_DIR", "/tmp/deptops/analytics")
+DOCUMENTS_DIR: str = os.getenv("DOCUMENTS_DIR", "/tmp/deptops/documents")
 
 
 def get_llm(temperature: float = 0.2):
@@ -37,7 +41,7 @@ def get_llm(temperature: float = 0.2):
         openai_api_base=OPENROUTER_BASE_URL,
         temperature=temperature,
         default_headers={
-            "HTTP-Referer": "https://deptops-ai.local",
+            "HTTP-Referer": "https://deptops-ai.onrender.com",
             "X-Title": "DeptOps AI",
         },
     )

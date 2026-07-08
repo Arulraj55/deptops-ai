@@ -4,51 +4,61 @@ Knowledge Agent
 RAG-based Q&A over institutional documents.
 
 Uses TF-IDF retrieval (scikit-learn) — zero downloads, works offline.
-Documents are stored as plain text chunks in a local JSON index.
-Falls back to raw retrieved text if LLM is rate-limited.
+Documents and the TF-IDF index are stored in Neon PostgreSQL so they
+persist across Render restarts.
 """
 
-import os
+import io
 import json
 import math
 import re
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 
-from config import get_llm, CHROMA_PERSIST_DIR, DOCUMENTS_DIR
-
-# Store our simple index as a JSON file (no vector DB needed)
-INDEX_PATH = Path(CHROMA_PERSIST_DIR) / "tfidf_index.json"
+from config import get_llm
 
 
-# ── Document loading ─────────────────────────────────────────────────────────
+# ── Document loading from DB ──────────────────────────────────────────────────
 
-def _load_documents(docs_dir: str) -> list[Document]:
-    docs_path = Path(docs_dir)
-    if not docs_path.exists():
-        return []
+def _load_documents_from_db() -> list[Document]:
+    """Load all knowledge documents stored in the database."""
+    import tempfile, os
+    from db_storage import list_knowledge_files, load_knowledge_file
+
+    filenames = list_knowledge_files()
     all_docs: list[Document] = []
-    for file in sorted(docs_path.iterdir()):
-        if file.name.startswith("."):
+
+    for filename in filenames:
+        content = load_knowledge_file(filename)
+        if content is None:
             continue
+        ext = Path(filename).suffix.lower()
         try:
-            if file.suffix.lower() == ".pdf":
-                loader = PyPDFLoader(str(file))
-            elif file.suffix.lower() in (".txt", ".md"):
-                loader = TextLoader(str(file), encoding="utf-8")
-            else:
-                continue
-            docs = loader.load()
-            for d in docs:
-                d.metadata["source"] = file.name
-            all_docs.extend(docs)
+            # Write to a temp file so LangChain loaders can read it
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                if ext == ".pdf":
+                    loader = PyPDFLoader(tmp_path)
+                elif ext in (".txt", ".md"):
+                    loader = TextLoader(tmp_path, encoding="utf-8")
+                else:
+                    continue
+                docs = loader.load()
+                for d in docs:
+                    d.metadata["source"] = filename
+                all_docs.extend(docs)
+            finally:
+                os.unlink(tmp_path)
         except Exception as exc:
-            print(f"[KnowledgeAgent] Skipped {file.name}: {exc}")
+            print(f"[KnowledgeAgent] Skipped {filename}: {exc}")
+
     return all_docs
 
 
@@ -67,11 +77,9 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _build_tfidf_index(chunks: list[Document]) -> dict:
-    """Build an in-memory TF-IDF index from document chunks."""
     corpus = [c.page_content for c in chunks]
     sources = [c.metadata.get("source", "Unknown") for c in chunks]
 
-    # Term frequencies per document
     tf: list[dict] = []
     for doc in corpus:
         tokens = _tokenize(doc)
@@ -81,30 +89,26 @@ def _build_tfidf_index(chunks: list[Document]) -> dict:
         total = max(len(tokens), 1)
         tf.append({t: count / total for t, count in freq.items()})
 
-    # Document frequencies
-    df: dict[str, int] = defaultdict(int)
+    df_counts: dict[str, int] = defaultdict(int)
     for doc_tf in tf:
         for term in doc_tf:
-            df[term] += 1
+            df_counts[term] += 1
 
     N = len(corpus)
-
     return {
         "chunks": corpus,
         "sources": sources,
         "tf": tf,
-        "df": dict(df),
+        "df": dict(df_counts),
         "N": N,
     }
 
 
 def _query_tfidf(index: dict, query: str, top_k: int = 5) -> list[dict]:
-    """Score all chunks against a query using TF-IDF cosine similarity."""
     query_tokens = _tokenize(query)
     N = index["N"]
     df = index["df"]
 
-    # Query TF-IDF vector
     q_freq: dict[str, int] = defaultdict(int)
     for t in query_tokens:
         q_freq[t] += 1
@@ -135,11 +139,10 @@ def _query_tfidf(index: dict, query: str, top_k: int = 5) -> list[dict]:
     return results
 
 
-# ── Index persistence ─────────────────────────────────────────────────────────
+# ── Index persistence (Neon DB) ───────────────────────────────────────────────
 
-def _save_index(index: dict):
-    INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # tf contains defaultdicts — convert to plain dicts for JSON
+def _save_index(index: dict) -> None:
+    from db_storage import save_tfidf_index
     serialisable = {
         "chunks": index["chunks"],
         "sources": index["sources"],
@@ -147,15 +150,15 @@ def _save_index(index: dict):
         "df": index["df"],
         "N": index["N"],
     }
-    with open(INDEX_PATH, "w", encoding="utf-8") as f:
-        json.dump(serialisable, f, ensure_ascii=False)
+    save_tfidf_index(json.dumps(serialisable, ensure_ascii=False))
 
 
 def _load_index() -> dict | None:
-    if not INDEX_PATH.exists():
+    from db_storage import load_tfidf_index
+    raw = load_tfidf_index()
+    if raw is None:
         return None
-    with open(INDEX_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return json.loads(raw)
 
 
 def _index_exists() -> bool:
@@ -166,14 +169,14 @@ def _index_exists() -> bool:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def build_vector_store(force_rebuild: bool = False):
-    """Build the TF-IDF index from documents."""
+    """Build the TF-IDF index from documents stored in the database."""
     if not force_rebuild and _index_exists():
         return _load_index()
 
-    docs = _load_documents(DOCUMENTS_DIR)
+    docs = _load_documents_from_db()
     if not docs:
         raise FileNotFoundError(
-            f"No documents found in '{DOCUMENTS_DIR}'. "
+            "No documents found in the database. "
             "Please upload PDF or TXT files and click 'Re-index Knowledge Base'."
         )
 
@@ -181,19 +184,14 @@ def build_vector_store(force_rebuild: bool = False):
     print(f"[KnowledgeAgent] Building TF-IDF index: {len(chunks)} chunks...")
     index = _build_tfidf_index(chunks)
     _save_index(index)
-    print(f"[KnowledgeAgent] Index saved. {len(chunks)} chunks indexed.")
+    print(f"[KnowledgeAgent] Index saved to DB. {len(chunks)} chunks indexed.")
     return index
 
 
 def _extract_answer_from_context(query: str, hits: list[dict], sources: list[str]) -> str:
-    """
-    Extract a clean, readable answer from retrieved chunks without LLM.
-    Finds the most relevant sentences from top chunks.
-    """
     import re as _re
     q_words = set(_re.findall(r"[a-z]+", query.lower()))
 
-    # Score each sentence by overlap with query words
     scored_sentences = []
     for hit in hits[:3]:
         text = hit["text"]
@@ -211,7 +209,6 @@ def _extract_answer_from_context(query: str, hits: list[dict], sources: list[str
     top_sentences = [s for _, s in scored_sentences[:6]]
 
     if not top_sentences:
-        # Just return the top chunk trimmed nicely
         return hits[0]["text"][:800].strip()
 
     src_str = ", ".join(f"`{s}`" for s in sources)
@@ -222,11 +219,11 @@ def _extract_answer_from_context(query: str, hits: list[dict], sources: list[str
 
 def run_knowledge_agent(query: str, top_k: int = 5) -> dict:
     """Answer a policy/regulation/syllabus question using TF-IDF RAG."""
+    from db_storage import list_knowledge_files
 
-    # Auto-index if needed
     if not _index_exists():
-        docs = _load_documents(DOCUMENTS_DIR)
-        if not docs:
+        filenames = list_knowledge_files()
+        if not filenames:
             return {
                 "answer": (
                     "No documents are indexed yet. "
@@ -255,8 +252,6 @@ def run_knowledge_agent(query: str, top_k: int = 5) -> dict:
 
     context = "\n\n---\n\n".join(h["text"] for h in hits)
     sources = sorted({h["source"] for h in hits})
-
-    # Smart fallback — extract key sentences from retrieved text instead of dumping raw content
     fallback_answer = _extract_answer_from_context(query, hits, sources)
 
     prompt = ChatPromptTemplate.from_messages([
@@ -286,20 +281,21 @@ def run_knowledge_agent(query: str, top_k: int = 5) -> dict:
 
 
 def ingest_documents() -> dict:
-    """Force re-index all documents."""
+    """Force re-index all documents from the database."""
+    from db_storage import list_knowledge_files
     try:
-        docs = _load_documents(DOCUMENTS_DIR)
-        if not docs:
+        filenames = list_knowledge_files()
+        if not filenames:
             return {
                 "success": False,
-                "message": f"No documents found in '{DOCUMENTS_DIR}'. Upload PDF or TXT files first.",
+                "message": "No documents found in the database. Upload PDF or TXT files first.",
                 "doc_count": 0,
             }
         index = build_vector_store(force_rebuild=True)
         return {
             "success": True,
-            "message": f"Indexed {len(docs)} document(s) → {index['N']} chunks stored.",
-            "doc_count": len(docs),
+            "message": f"Indexed {len(filenames)} document(s) → {index['N']} chunks stored.",
+            "doc_count": len(filenames),
         }
     except Exception as exc:
         return {"success": False, "message": str(exc), "doc_count": 0}

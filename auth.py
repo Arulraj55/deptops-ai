@@ -20,6 +20,7 @@ def _get_conn():
 def _init_db():
     with _get_conn() as conn:
         with conn.cursor() as cur:
+            # User accounts table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS hod_users (
                     id SERIAL PRIMARY KEY,
@@ -27,6 +28,32 @@ def _init_db():
                     full_name VARCHAR(120),
                     password_hash TEXT NOT NULL,
                     created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            # Analytics datasets stored as binary in DB
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_files (
+                    id SERIAL PRIMARY KEY,
+                    filename VARCHAR(255) NOT NULL,
+                    content BYTEA NOT NULL,
+                    uploaded_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            # Knowledge documents stored as binary in DB
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_files (
+                    id SERIAL PRIMARY KEY,
+                    filename VARCHAR(255) NOT NULL,
+                    content BYTEA NOT NULL,
+                    uploaded_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            # TF-IDF index stored as JSON text in DB
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tfidf_index (
+                    id SERIAL PRIMARY KEY,
+                    index_json TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
         conn.commit()
@@ -58,7 +85,7 @@ def auth_gate():
             _init_db()
             st.session_state._db_ready = True
         except Exception as e:
-            st.error(f"Database connection failed: {e}\n\nCheck DATABASE_URL in .env")
+            st.error(f"Database connection failed: {e}\n\nCheck DATABASE_URL in environment variables.")
             st.stop()
 
     if st.session_state.get("authenticated"):

@@ -2,34 +2,40 @@
 Analytics Agent
 ---------------
 Analyzes academic datasets (CSV/Excel) using Pandas.
-Answers HOD questions directly from computed statistics.
+Files are loaded from Neon PostgreSQL (via db_storage) so they persist
+across Render restarts.
 LLM enhances the answer when available — but the answer is ALWAYS good
 without LLM too, using smart query-aware fallback logic.
 """
 
+import io
 import os
 import re
 import pandas as pd
 from pathlib import Path
-from config import get_llm, ANALYTICS_DATA_DIR
+from config import get_llm
 
 
 # ── File discovery ────────────────────────────────────────────────────────────
 
 def _list_available_files() -> list[str]:
-    data_dir = Path(ANALYTICS_DATA_DIR)
-    if not data_dir.exists():
+    """Return list of filenames stored in the database."""
+    try:
+        from db_storage import list_analytics_files
+        return [row["filename"] for row in list_analytics_files()]
+    except Exception:
         return []
-    return [
-        str(f) for f in sorted(data_dir.iterdir())
-        if f.suffix.lower() in (".csv", ".xlsx", ".xls")
-        and not f.name.startswith(".")
-    ]
 
 
-def _load_dataframe(file_path: str) -> pd.DataFrame:
-    path = Path(file_path)
-    return pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
+def _load_dataframe(filename: str) -> pd.DataFrame:
+    """Load a dataframe from the database by filename."""
+    from db_storage import load_analytics_file
+    content = load_analytics_file(filename)
+    if content is None:
+        raise FileNotFoundError(f"File '{filename}' not found in database.")
+    buf = io.BytesIO(content)
+    ext = Path(filename).suffix.lower()
+    return pd.read_csv(buf) if ext == ".csv" else pd.read_excel(buf)
 
 
 # ── Stats computation ─────────────────────────────────────────────────────────
@@ -102,16 +108,11 @@ def _compute_stats(df: pd.DataFrame) -> dict:
 # ── Smart query-aware fallback answer ─────────────────────────────────────────
 
 def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str) -> str:
-    """
-    Directly answer the query using computed stats — no LLM needed.
-    Understands common academic questions.
-    """
     q = query.lower()
     df_n = df.copy()
     df_n.columns = [str(c).strip().lower().replace(" ", "_") for c in df_n.columns]
     lines = []
 
-    # ── Pass / Fail questions
     if any(w in q for w in ["pass", "fail", "result", "passed", "failed"]):
         if "pass_percentage" in stats:
             lines += [
@@ -125,7 +126,6 @@ def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str
         else:
             lines.append(f"No pass/fail column found in **{file_name}**.")
 
-    # ── Attendance questions
     elif any(w in q for w in ["attendance", "absent", "eligible", "below 75", "ineligible"]):
         if "avg_attendance" in stats:
             lines += [
@@ -137,7 +137,6 @@ def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str
         else:
             lines.append(f"No attendance column found in **{file_name}**.")
 
-    # ── Placement questions
     elif any(w in q for w in ["placement", "placed", "company", "package", "job", "recruit"]):
         if "placed_count" in stats:
             lines += [
@@ -147,7 +146,6 @@ def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str
             ]
             if "placement_eligible" in stats:
                 lines.append(f"- CGPA Eligible (≥6.0): **{stats['placement_eligible']} ({stats['placement_eligible_pct']}%)**")
-            # Top companies
             for cc in ("company", "companies", "employer"):
                 if cc in df_n.columns:
                     top = df_n[df_n[cc].notna()][cc].value_counts().head(5)
@@ -163,7 +161,6 @@ def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str
         else:
             lines.append(f"No placement data found in **{file_name}**.")
 
-    # ── CGPA / GPA questions
     elif any(w in q for w in ["cgpa", "gpa", "grade", "aggregate", "score"]):
         if "avg_cgpa" in stats:
             lines += [
@@ -181,7 +178,6 @@ def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str
         else:
             lines.append(f"No CGPA/GPA column found in **{file_name}**.")
 
-    # ── Subject / marks questions
     elif any(w in q for w in ["subject", "marks", "average", "performance", "weak", "strong"]):
         if "subject_averages" in stats:
             sa = stats["subject_averages"]
@@ -198,7 +194,6 @@ def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str
         else:
             lines.append(f"No subject marks columns found in **{file_name}**.")
 
-    # ── Faculty questions
     elif any(w in q for w in ["faculty", "teacher", "professor", "feedback"]):
         if "avg_avg_student_score" in stats:
             lines += [
@@ -210,7 +205,6 @@ def _answer_from_stats(query: str, stats: dict, df: pd.DataFrame, file_name: str
         else:
             lines.append(f"No faculty performance data found in **{file_name}**.")
 
-    # ── General / overview
     else:
         lines.append(f"**Dataset Overview — {file_name}**")
         lines.append(f"- Rows: **{len(df_n)}** | Columns: **{len(df_n.columns)}**")
@@ -253,8 +247,13 @@ def _build_summary_text(df: pd.DataFrame, stats: dict, file_name: str) -> str:
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
 def run_analytics_agent(query: str, file_path: str | None = None) -> dict:
+    """
+    file_path here is now a filename (not a full path) — it matches what's
+    stored in the database.  If not provided, the first available file is used.
+    """
+    available = _list_available_files()
+
     if not file_path:
-        available = _list_available_files()
         if not available:
             return {
                 "answer": "No data files found. Please upload a CSV or Excel file from the sidebar.",
@@ -262,19 +261,18 @@ def run_analytics_agent(query: str, file_path: str | None = None) -> dict:
             }
         file_path = available[0]
 
+    # file_path may be a bare filename or a full path — normalise to filename only
+    filename = Path(file_path).name
+
     try:
-        df = _load_dataframe(file_path)
+        df = _load_dataframe(filename)
     except Exception as exc:
-        return {"answer": f"Could not load file: {exc}", "stats": {}, "file_used": file_path, "error": str(exc)}
+        return {"answer": f"Could not load file: {exc}", "stats": {}, "file_used": filename, "error": str(exc)}
 
     stats = _compute_stats(df)
-    file_name = os.path.basename(file_path)
+    direct_answer = _answer_from_stats(query, stats, df, filename)
+    summary_text = _build_summary_text(df, stats, filename)
 
-    # Always compute a direct stats-based answer first
-    direct_answer = _answer_from_stats(query, stats, df, file_name)
-    summary_text = _build_summary_text(df, stats, file_name)
-
-    # Try LLM for a more conversational/detailed answer
     answer = direct_answer
     try:
         from langchain_core.prompts import ChatPromptTemplate
@@ -291,13 +289,13 @@ def run_analytics_agent(query: str, file_path: str | None = None) -> dict:
         if response and response.content and len(response.content.strip()) > 30:
             answer = response.content
     except Exception:
-        pass  # use direct_answer silently
+        pass
 
     return {
         "answer": answer,
         "stats": stats,
-        "file_used": file_path,
-        "file_name": file_name,
+        "file_used": filename,
+        "file_name": filename,
         "error": None,
     }
 
@@ -310,5 +308,5 @@ def compute_stats(df) -> dict:
     return _compute_stats(df)
 
 
-def load_dataframe(file_path: str):
-    return _load_dataframe(file_path)
+def load_dataframe(filename: str):
+    return _load_dataframe(filename)
