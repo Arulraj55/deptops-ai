@@ -36,8 +36,6 @@ st.set_page_config(
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
-
 :root {
     --accent: #0f9d8a;
     --accent-2: #2f7cb8;
@@ -45,12 +43,10 @@ st.markdown("""
     --surface: var(--secondary-background-color);
     --text: var(--text-color);
     --edge: rgba(127, 127, 127, 0.28);
-    --nav-surface: rgba(255, 255, 255, 0.06);
-    --nav-surface-strong: rgba(255, 255, 255, 0.12);
 }
 
 html, body, [class*="css"] {
-    font-family: 'Manrope', sans-serif;
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
     color: var(--text);
 }
 
@@ -81,7 +77,6 @@ button[kind="header"], [data-testid="stHeader"], .stAppHeader {
 }
 
 .app-topbar-brand {
-    font-family: 'Space Grotesk', sans-serif;
     font-size: 1.05rem;
     font-weight: 700;
     line-height: 1.2;
@@ -546,8 +541,9 @@ auth_gate()
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_df(filename: str) -> pd.DataFrame:
-    """Load a dataframe from DB by filename."""
+    """Load a dataframe from DB by filename. Cached 60s to avoid repeated DB hits."""
     import io
     content = db_storage.load_analytics_file(filename)
     if content is None:
@@ -556,20 +552,23 @@ def load_df(filename: str) -> pd.DataFrame:
     p = Path(filename)
     return pd.read_csv(buf) if p.suffix.lower() == ".csv" else pd.read_excel(buf)
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_datasets() -> list[str]:
-    """Return list of analytics filenames stored in DB."""
+    """Return list of analytics filenames stored in DB. Cached 30s."""
     try:
         return [row["filename"] for row in db_storage.list_analytics_files()]
     except Exception:
         return []
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_doc_list() -> list[str]:
-    """Return list of knowledge document filenames stored in DB."""
+    """Return list of knowledge document filenames stored in DB. Cached 30s."""
     try:
         return db_storage.list_knowledge_files()
     except Exception:
         return []
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_chunk_count() -> int:
     try:
         import json
@@ -578,7 +577,7 @@ def get_chunk_count() -> int:
         if raw is None:
             return 0
         return json.loads(raw).get("N", 0)
-    except:
+    except Exception:
         return 0
 
 def compute_stats(df: pd.DataFrame) -> dict:
@@ -600,6 +599,7 @@ def compute_stats(df: pd.DataFrame) -> dict:
         if ac in cols:
             stats["avg_attendance"]=round(float(df[ac].mean()),2)
             stats["below_75_count"]=int((df[ac]<75).sum())
+            stats["below_75_pct"]=round(stats["below_75_count"]/len(df)*100,2) if len(df) else 0
             stats["eligible_exam_count"]=int((df[ac]>=75).sum())
             break
     for gc in ("cgpa","gpa","aggregate"):
@@ -994,7 +994,6 @@ elif st.session_state.nav_page == "analytics":
             # ── Charts ───────────────────────────────────────────
             # 1. Pass / Fail
             if "pass_count" in stats and stats["pass_count"] + stats["fail_count"] > 0:
-                st.markdown("### 📊 Pass vs Fail Distribution")
                 ch1, ch2 = st.columns(2)
                 with ch1:
                     fig_pf = go.Figure(go.Pie(
@@ -1005,82 +1004,77 @@ elif st.session_state.nav_page == "analytics":
                         textinfo="label+percent+value",
                     ))
                     fig_pf.update_layout(
-                        title="Pass vs Fail — Donut Chart",
-                        height=340,
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        showlegend=True,
+                        title=dict(text="✅ Pass vs Fail — Donut", font=dict(size=15)),
+                        height=340, paper_bgcolor="rgba(0,0,0,0)", showlegend=True,
                     )
                     st.plotly_chart(fig_pf, use_container_width=True)
                 with ch2:
-                    # Bar chart for pass/fail
                     fig_pf_bar = px.bar(
                         x=["Pass", "Fail"],
                         y=[stats["pass_count"], stats["fail_count"]],
                         color=["Pass", "Fail"],
                         color_discrete_map={"Pass": "#2ecc71", "Fail": "#e74c3c"},
-                        title="Pass vs Fail — Count",
                         labels={"x": "Result", "y": "Number of Students"},
                         text_auto=True,
                     )
                     fig_pf_bar.update_layout(
-                        height=340,
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        showlegend=False,
+                        title=dict(text="✅ Pass vs Fail — Count", font=dict(size=15)),
+                        height=340, paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)", showlegend=False,
                     )
                     st.plotly_chart(fig_pf_bar, use_container_width=True)
 
             # 2. Attendance
             att_col = next((c for c in ("attendance", "attendance_percentage", "att_%", "attendance_%") if c in df_n.columns), None)
             if att_col:
-                st.markdown("### 📅 Attendance Analysis")
                 ch3, ch4 = st.columns(2)
                 with ch3:
                     fig_att = px.histogram(
                         df_n, x=att_col, nbins=20,
-                        title="Attendance Distribution",
                         color_discrete_sequence=["#3498db"],
                         labels={att_col: "Attendance (%)"},
                     )
                     fig_att.add_vline(x=75, line_dash="dash", line_color="#e74c3c",
-                                      annotation_text="75% Min Threshold")
-                    fig_att.update_layout(height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                                      annotation_text="75% Min")
+                    fig_att.update_layout(
+                        title=dict(text="📅 Attendance Distribution", font=dict(size=15)),
+                        height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+                    )
                     st.plotly_chart(fig_att, use_container_width=True)
                 with ch4:
                     att_cats = {
-                        "< 60%":   int((df_n[att_col] < 60).sum()),
-                        "60–75%":  int(((df_n[att_col] >= 60) & (df_n[att_col] < 75)).sum()),
-                        "75–90%":  int(((df_n[att_col] >= 75) & (df_n[att_col] < 90)).sum()),
-                        "90%+":    int((df_n[att_col] >= 90).sum()),
+                        "Critical (<60%)":  int((df_n[att_col] < 60).sum()),
+                        "Risk (60–75%)":    int(((df_n[att_col] >= 60) & (df_n[att_col] < 75)).sum()),
+                        "Good (75–90%)":    int(((df_n[att_col] >= 75) & (df_n[att_col] < 90)).sum()),
+                        "Excellent (90%+)": int((df_n[att_col] >= 90).sum()),
                     }
                     fig_att_pie = px.pie(
                         names=list(att_cats.keys()),
                         values=list(att_cats.values()),
-                        title="Attendance Bands",
                         color_discrete_sequence=["#e74c3c", "#f39c12", "#3498db", "#2ecc71"],
                     )
-                    fig_att_pie.update_layout(height=320, paper_bgcolor="rgba(0,0,0,0)")
+                    fig_att_pie.update_layout(
+                        title=dict(text="📅 Attendance Bands", font=dict(size=15)),
+                        height=320, paper_bgcolor="rgba(0,0,0,0)"
+                    )
                     st.plotly_chart(fig_att_pie, use_container_width=True)
 
             # 3. Subject-wise averages
             if "subject_averages" in stats:
                 sa = stats["subject_averages"]
-                st.markdown("### 📚 Subject-wise Average Marks")
                 subj_labels = [k.replace("_", " ").title() for k in sa.keys()]
                 subj_values = list(sa.values())
                 colors_subj = ["#2ecc71" if v >= 60 else "#f39c12" if v >= 40 else "#e74c3c" for v in subj_values]
                 fig_subj = px.bar(
                     x=subj_labels, y=subj_values,
-                    title="Average Marks per Subject",
                     labels={"x": "Subject", "y": "Average Marks"},
                     text_auto=True,
                 )
                 fig_subj.update_traces(marker_color=colors_subj)
-                fig_subj.add_hline(y=40, line_dash="dash", line_color="#e74c3c",
-                                   annotation_text="Pass Mark (40)")
-                fig_subj.add_hline(y=60, line_dash="dot", line_color="#2ecc71",
-                                   annotation_text="Good (60)")
+                fig_subj.add_hline(y=40, line_dash="dash", line_color="#e74c3c", annotation_text="Pass (40)")
+                fig_subj.add_hline(y=60, line_dash="dot", line_color="#2ecc71", annotation_text="Good (60)")
                 fig_subj.update_layout(
+                    title=dict(text="📚 Subject-wise Average Marks", font=dict(size=15)),
                     height=400, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                     xaxis_tickangle=-30,
                 )
@@ -1089,18 +1083,19 @@ elif st.session_state.nav_page == "analytics":
             # 4. CGPA
             cgpa_col = next((c for c in ("cgpa", "gpa", "aggregate") if c in df_n.columns), None)
             if cgpa_col:
-                st.markdown("### 🎓 CGPA / GPA Analysis")
                 ch5, ch6 = st.columns(2)
                 with ch5:
                     fig_cgpa = px.histogram(
                         df_n, x=cgpa_col, nbins=20,
-                        title="CGPA Distribution",
                         color_discrete_sequence=["#9b59b6"],
                         labels={cgpa_col: "CGPA"},
                     )
                     fig_cgpa.add_vline(x=6.0, line_dash="dash", line_color="#e67e22",
                                        annotation_text="Placement Min (6.0)")
-                    fig_cgpa.update_layout(height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                    fig_cgpa.update_layout(
+                        title=dict(text="🎓 CGPA Distribution", font=dict(size=15)),
+                        height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+                    )
                     st.plotly_chart(fig_cgpa, use_container_width=True)
                 with ch6:
                     buckets = {
@@ -1108,42 +1103,47 @@ elif st.session_state.nav_page == "analytics":
                         "5.0 – 6.0":  int(((df_n[cgpa_col] >= 5) & (df_n[cgpa_col] < 6)).sum()),
                         "6.0 – 7.5":  int(((df_n[cgpa_col] >= 6) & (df_n[cgpa_col] < 7.5)).sum()),
                         "7.5 – 9.0":  int(((df_n[cgpa_col] >= 7.5) & (df_n[cgpa_col] < 9)).sum()),
-                        "9.0 +":      int((df_n[cgpa_col] >= 9).sum()),
+                        "9.0 and above": int((df_n[cgpa_col] >= 9).sum()),
                     }
                     fig_cgpa_pie = px.pie(
                         names=list(buckets.keys()),
                         values=list(buckets.values()),
-                        title="CGPA Brackets",
                         color_discrete_sequence=px.colors.sequential.Purples_r,
                     )
-                    fig_cgpa_pie.update_layout(height=320, paper_bgcolor="rgba(0,0,0,0)")
+                    fig_cgpa_pie.update_layout(
+                        title=dict(text="🎓 CGPA Brackets", font=dict(size=15)),
+                        height=320, paper_bgcolor="rgba(0,0,0,0)"
+                    )
                     st.plotly_chart(fig_cgpa_pie, use_container_width=True)
 
             # 5. Placement
             if "placed" in df_n.columns or "placement_status" in df_n.columns:
                 placed_col = "placed" if "placed" in df_n.columns else "placement_status"
-                st.markdown("### 💼 Placement Status")
                 pc_df = df_n[placed_col].astype(str).str.strip().str.upper().value_counts().reset_index()
                 pc_df.columns = ["Status", "Count"]
                 ch7, ch8 = st.columns(2)
                 with ch7:
                     fig_place = px.pie(
                         pc_df, names="Status", values="Count",
-                        title="Placement Status Distribution",
                         color_discrete_sequence=["#2ecc71", "#e74c3c", "#3498db"],
                     )
-                    fig_place.update_layout(height=300, paper_bgcolor="rgba(0,0,0,0)")
+                    fig_place.update_layout(
+                        title=dict(text="💼 Placement Status", font=dict(size=15)),
+                        height=300, paper_bgcolor="rgba(0,0,0,0)"
+                    )
                     st.plotly_chart(fig_place, use_container_width=True)
                 with ch8:
                     fig_place_bar = px.bar(
                         pc_df, x="Status", y="Count",
-                        title="Placement Count",
                         color="Status",
                         color_discrete_sequence=["#2ecc71", "#e74c3c", "#3498db"],
                         text_auto=True,
                     )
-                    fig_place_bar.update_layout(height=300, paper_bgcolor="rgba(0,0,0,0)",
-                                                plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
+                    fig_place_bar.update_layout(
+                        title=dict(text="💼 Placement Count", font=dict(size=15)),
+                        height=300, paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)", showlegend=False
+                    )
                     st.plotly_chart(fig_place_bar, use_container_width=True)
 
         # ── Generic / non-academic data
