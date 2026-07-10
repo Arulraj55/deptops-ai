@@ -42,14 +42,36 @@ _WEB = re.compile(
 
 
 def classify_intent(query: str) -> str:
-    """Classify query into analytics / knowledge / website using keyword scoring."""
-    a = len(_ANA.findall(query))
-    k = len(_KNOW.findall(query))
-    w = len(_WEB.findall(query))
-
+    """Classify query into analytics / knowledge / website using LLM with fallback to keyword scoring."""
     # Website check: if URL present, always website
     if re.search(r"https?://\S+", query):
         return "website"
+
+    # Try LLM classification for accurate intent routing
+    try:
+        from config import get_llm
+        from langchain_core.prompts import ChatPromptTemplate
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Classify the query into one of three categories:\n"
+                       "- 'analytics' (asking for stats, percentages, numbers, grades, attendance from a dataset)\n"
+                       "- 'knowledge' (asking for rules, regulations, syllabus, policies, procedures)\n"
+                       "- 'website' (asking to check a link or website)\n"
+                       "Return ONLY the category name in lowercase without any other text."),
+            ("human", "{query}")
+        ])
+        llm = get_llm(temperature=0.0)
+        resp = (prompt | llm).invoke({"query": query})
+        if resp and resp.content:
+            intent = resp.content.strip().lower()
+            if intent in ["analytics", "knowledge", "website"]:
+                return intent
+    except Exception:
+        pass
+
+    # Fallback to keyword scoring
+    a = len(_ANA.findall(query))
+    k = len(_KNOW.findall(query))
+    w = len(_WEB.findall(query))
 
     if w > 0 and w >= a and w >= k:
         return "website"
@@ -66,6 +88,7 @@ def classify_intent(query: str) -> str:
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
 def process_query(
+    username: str,
     query: str,
     file_path: str | None = None,
     url: str | None = None,
@@ -86,11 +109,11 @@ def process_query(
     try:
         if intent == "analytics":
             from agents.analytics_agent import run_analytics_agent
-            result = run_analytics_agent(query=query, file_path=file_path)
+            result = run_analytics_agent(username=username, query=query, file_path=file_path)
 
         elif intent == "knowledge":
             from agents.knowledge_agent import run_knowledge_agent
-            result = run_knowledge_agent(query=query)
+            result = run_knowledge_agent(username=username, query=query)
 
         elif intent == "website":
             from agents.website_testing_agent import run_website_testing_agent

@@ -12,15 +12,15 @@ from dotenv import load_dotenv
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ── DB ────────────────────────────────────────────────────────────────────────
 
 def _get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
+
 def _init_db():
     with _get_conn() as conn:
         with conn.cursor() as cur:
-            # User accounts table
+            # User accounts
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS hod_users (
                     id SERIAL PRIMARY KEY,
@@ -30,39 +30,51 @@ def _init_db():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            # Analytics datasets stored as binary in DB
+            # Analytics datasets — per user
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS analytics_files (
                     id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL DEFAULT 'legacy',
                     filename VARCHAR(255) NOT NULL,
                     content BYTEA NOT NULL,
                     uploaded_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            # Knowledge documents stored as binary in DB
+            # Knowledge documents — per user
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS knowledge_files (
                     id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL DEFAULT 'legacy',
                     filename VARCHAR(255) NOT NULL,
                     content BYTEA NOT NULL,
                     uploaded_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            # TF-IDF index stored as JSON text in DB
+            # TF-IDF index — per user
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tfidf_index (
                     id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL DEFAULT 'legacy',
                     index_json TEXT NOT NULL,
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
         conn.commit()
 
+    # Add username column to existing tables if they were created before this change
+    from db_storage import migrate_add_username_columns
+    migrate_add_username_columns()
+
+
 def _get_user(username: str):
     with _get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT username, full_name, password_hash FROM hod_users WHERE username=%s", (username,))
+            cur.execute(
+                "SELECT username, full_name, password_hash FROM hod_users WHERE username=%s",
+                (username,),
+            )
             return cur.fetchone()
+
 
 def _create_user(username: str, full_name: str, password: str):
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -70,14 +82,14 @@ def _create_user(username: str, full_name: str, password: str):
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO hod_users (username, full_name, password_hash) VALUES (%s, %s, %s)",
-                (username, full_name, hashed)
+                (username, full_name, hashed),
             )
         conn.commit()
+
 
 def _verify(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
-# ── Auth gate ─────────────────────────────────────────────────────────────────
 
 def auth_gate():
     if not st.session_state.get("_db_ready"):

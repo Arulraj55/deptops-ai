@@ -25,16 +25,16 @@ from config import get_llm
 
 # ── Document loading from DB ──────────────────────────────────────────────────
 
-def _load_documents_from_db() -> list[Document]:
+def _load_documents_from_db(username: str) -> list[Document]:
     """Load all knowledge documents stored in the database."""
     import tempfile, os
     from db_storage import list_knowledge_files, load_knowledge_file
 
-    filenames = list_knowledge_files()
+    filenames = list_knowledge_files(username)
     all_docs: list[Document] = []
 
     for filename in filenames:
-        content = load_knowledge_file(filename)
+        content = load_knowledge_file(username, filename)
         if content is None:
             continue
         ext = Path(filename).suffix.lower()
@@ -141,7 +141,7 @@ def _query_tfidf(index: dict, query: str, top_k: int = 5) -> list[dict]:
 
 # ── Index persistence (Neon DB) ───────────────────────────────────────────────
 
-def _save_index(index: dict) -> None:
+def _save_index(username: str, index: dict) -> None:
     from db_storage import save_tfidf_index
     serialisable = {
         "chunks": index["chunks"],
@@ -150,30 +150,30 @@ def _save_index(index: dict) -> None:
         "df": index["df"],
         "N": index["N"],
     }
-    save_tfidf_index(json.dumps(serialisable, ensure_ascii=False))
+    save_tfidf_index(username, json.dumps(serialisable, ensure_ascii=False))
 
 
-def _load_index() -> dict | None:
+def _load_index(username: str) -> dict | None:
     from db_storage import load_tfidf_index
-    raw = load_tfidf_index()
+    raw = load_tfidf_index(username)
     if raw is None:
         return None
     return json.loads(raw)
 
 
-def _index_exists() -> bool:
-    idx = _load_index()
+def _index_exists(username: str) -> bool:
+    idx = _load_index(username)
     return idx is not None and idx.get("N", 0) > 0
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def build_vector_store(force_rebuild: bool = False):
+def build_vector_store(username: str, force_rebuild: bool = False):
     """Build the TF-IDF index from documents stored in the database."""
-    if not force_rebuild and _index_exists():
-        return _load_index()
+    if not force_rebuild and _index_exists(username):
+        return _load_index(username)
 
-    docs = _load_documents_from_db()
+    docs = _load_documents_from_db(username)
     if not docs:
         raise FileNotFoundError(
             "No documents found in the database. "
@@ -183,7 +183,7 @@ def build_vector_store(force_rebuild: bool = False):
     chunks = _split(docs)
     print(f"[KnowledgeAgent] Building TF-IDF index: {len(chunks)} chunks...")
     index = _build_tfidf_index(chunks)
-    _save_index(index)
+    _save_index(username, index)
     print(f"[KnowledgeAgent] Index saved to DB. {len(chunks)} chunks indexed.")
     return index
 
@@ -217,12 +217,12 @@ def _extract_answer_from_context(query: str, hits: list[dict], sources: list[str
     return "\n".join(answer_lines)
 
 
-def run_knowledge_agent(query: str, top_k: int = 8) -> dict:
+def run_knowledge_agent(username: str, query: str, top_k: int = 8) -> dict:
     """Answer a policy/regulation/syllabus question using TF-IDF RAG."""
     from db_storage import list_knowledge_files
 
-    if not _index_exists():
-        filenames = list_knowledge_files()
+    if not _index_exists(username):
+        filenames = list_knowledge_files(username)
         if not filenames:
             return {
                 "answer": (
@@ -234,11 +234,11 @@ def run_knowledge_agent(query: str, top_k: int = 8) -> dict:
                 "error": "no_documents",
             }
         try:
-            build_vector_store(force_rebuild=True)
+            build_vector_store(username, force_rebuild=True)
         except Exception as exc:
             return {"answer": f"Indexing error: {exc}", "sources": [], "error": str(exc)}
 
-    index = _load_index()
+    index = _load_index(username)
     if not index:
         return {"answer": "Index not found.", "sources": [], "error": "no_index"}
 
@@ -283,18 +283,18 @@ def run_knowledge_agent(query: str, top_k: int = 8) -> dict:
     return {"answer": answer, "sources": sources, "error": None}
 
 
-def ingest_documents() -> dict:
+def ingest_documents(username: str) -> dict:
     """Force re-index all documents from the database."""
     from db_storage import list_knowledge_files
     try:
-        filenames = list_knowledge_files()
+        filenames = list_knowledge_files(username)
         if not filenames:
             return {
                 "success": False,
                 "message": "No documents found in the database. Upload PDF or TXT files first.",
                 "doc_count": 0,
             }
-        index = build_vector_store(force_rebuild=True)
+        index = build_vector_store(username, force_rebuild=True)
         return {
             "success": True,
             "message": f"Indexed {len(filenames)} document(s) → {index['N']} chunks stored.",
@@ -304,7 +304,7 @@ def ingest_documents() -> dict:
         return {"success": False, "message": str(exc), "doc_count": 0}
 
 
-def get_doc_count() -> int:
+def get_doc_count(username: str) -> int:
     """Return number of indexed chunks, 0 if not built."""
-    idx = _load_index()
+    idx = _load_index(username)
     return idx["N"] if idx else 0

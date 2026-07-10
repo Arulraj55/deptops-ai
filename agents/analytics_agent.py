@@ -20,17 +20,17 @@ from config import get_llm
 
 # ── File discovery ────────────────────────────────────────────────────────────
 
-def _list_available_files() -> list[str]:
+def _list_available_files(username: str) -> list[str]:
     try:
         from db_storage import list_analytics_files
-        return [row["filename"] for row in list_analytics_files()]
+        return [row["filename"] for row in list_analytics_files(username)]
     except Exception:
         return []
 
 
-def _load_dataframe(filename: str) -> pd.DataFrame:
+def _load_dataframe(username: str, filename: str) -> pd.DataFrame:
     from db_storage import load_analytics_file
-    content = load_analytics_file(filename)
+    content = load_analytics_file(username, filename)
     if content is None:
         raise FileNotFoundError(f"File '{filename}' not found in database.")
     buf = io.BytesIO(content)
@@ -252,8 +252,8 @@ def _direct_answer(query: str, stats: dict, df: pd.DataFrame, filename: str) -> 
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
-def run_analytics_agent(query: str, file_path: str | None = None) -> dict:
-    available = _list_available_files()
+def run_analytics_agent(username: str, query: str, file_path: str | None = None) -> dict:
+    available = _list_available_files(username)
 
     if not file_path:
         if not available:
@@ -266,7 +266,7 @@ def run_analytics_agent(query: str, file_path: str | None = None) -> dict:
     filename = Path(file_path).name
 
     try:
-        df = _load_dataframe(filename)
+        df = _load_dataframe(username, filename)
     except Exception as exc:
         return {"answer": f"Could not load file: {exc}", "stats": {}, "file_used": filename, "error": str(exc)}
 
@@ -309,13 +309,13 @@ def run_analytics_agent(query: str, file_path: str | None = None) -> dict:
     }
 
 
-def get_available_datasets() -> list[str]:
-    return _list_available_files()
+def get_available_datasets(username: str) -> list[str]:
+    return _list_available_files(username)
 
 
 def compute_stats(df) -> dict:
     return _compute_stats(df)
 
 
-def load_dataframe(filename: str):
-    return _load_dataframe(filename)
+def load_dataframe(username: str, filename: str):
+    return _load_dataframe(username, filename)

@@ -542,10 +542,10 @@ auth_gate()
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60, show_spinner=False)
-def load_df(filename: str) -> pd.DataFrame:
-    """Load a dataframe from DB by filename. Cached 60s to avoid repeated DB hits."""
+def load_df(username: str, filename: str) -> pd.DataFrame:
+    """Load a dataframe from DB by username + filename. Cached 60s per user."""
     import io
-    content = db_storage.load_analytics_file(filename)
+    content = db_storage.load_analytics_file(username, filename)
     if content is None:
         raise FileNotFoundError(f"File '{filename}' not found in database.")
     buf = io.BytesIO(content)
@@ -553,27 +553,27 @@ def load_df(filename: str) -> pd.DataFrame:
     return pd.read_csv(buf) if p.suffix.lower() == ".csv" else pd.read_excel(buf)
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_datasets() -> list[str]:
-    """Return list of analytics filenames stored in DB. Cached 30s."""
+def get_datasets(username: str) -> list[str]:
+    """Return list of analytics filenames for this user. Cached 30s."""
     try:
-        return [row["filename"] for row in db_storage.list_analytics_files()]
+        return [row["filename"] for row in db_storage.list_analytics_files(username)]
     except Exception:
         return []
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_doc_list() -> list[str]:
-    """Return list of knowledge document filenames stored in DB. Cached 30s."""
+def get_doc_list(username: str) -> list[str]:
+    """Return list of knowledge document filenames for this user. Cached 30s."""
     try:
-        return db_storage.list_knowledge_files()
+        return db_storage.list_knowledge_files(username)
     except Exception:
         return []
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_chunk_count() -> int:
+def get_chunk_count(username: str) -> int:
     try:
         import json
         from db_storage import load_tfidf_index
-        raw = load_tfidf_index()
+        raw = load_tfidf_index(username)
         if raw is None:
             return 0
         return json.loads(raw).get("N", 0)
@@ -707,7 +707,7 @@ with st.sidebar:
         st.caption("CSV/Excel → Analytics Agent")
         up_csv = st.file_uploader("", type=["csv","xlsx","xls"], key="up_csv", label_visibility="collapsed")
         if up_csv:
-            db_storage.save_analytics_file(up_csv.name, up_csv.getbuffer().tobytes())
+            db_storage.save_analytics_file(username, up_csv.name, up_csv.getbuffer().tobytes())
             st.success(f"✅ {up_csv.name}")
 
     st.markdown('<div class="sidebar-gap"></div>', unsafe_allow_html=True)
@@ -717,20 +717,20 @@ with st.sidebar:
         st.caption("PDF/TXT → Knowledge Base Agent")
         up_doc = st.file_uploader("", type=["pdf","txt"], key="up_doc", label_visibility="collapsed")
         if up_doc:
-            db_storage.save_knowledge_file(up_doc.name, up_doc.getbuffer().tobytes())
+            db_storage.save_knowledge_file(username, up_doc.name, up_doc.getbuffer().tobytes())
             st.success(f"✅ {up_doc.name} saved")
             st.info("👆 Click 'Re-index' below to make it searchable")
 
-        docs = get_doc_list()
+        docs = get_doc_list(username)
         if docs:
             st.caption(f"📚 Documents: {', '.join(docs)}")
-        chunks = get_chunk_count()
+        chunks = get_chunk_count(username)
         st.caption(f"🔢 Indexed chunks: {chunks}" if chunks else "⚠️ Not indexed yet")
 
         if st.button("🔄 Re-index Knowledge Base", use_container_width=True, type="secondary"):
             with st.spinner("Indexing documents..."):
                 from agents.knowledge_agent import ingest_documents
-                res = ingest_documents()
+                res = ingest_documents(username)
             if res["success"]:
                 st.success(res["message"])
             else:
@@ -820,15 +820,15 @@ if st.session_state.nav_page == "home":
     st.markdown('<div class="section-title">📁 Current Data</div>', unsafe_allow_html=True)
     d1, d2 = st.columns(2)
     with d1:
-        datasets = get_datasets()
+        datasets = get_datasets(username)
         if datasets:
             dataset_items = "".join([f'<div class="data-item">✅ {d}</div>' for d in datasets])
             st.markdown(f'<div class="data-card"><h4>📊 Datasets Ready</h4>{dataset_items}</div>', unsafe_allow_html=True)
         else:
             st.warning("No datasets uploaded yet. Upload CSV/Excel from sidebar.")
     with d2:
-        docs = get_doc_list()
-        chunks = get_chunk_count()
+        docs = get_doc_list(username)
+        chunks = get_chunk_count(username)
         if docs:
             doc_items = "".join([f'<div class="data-item">✅ {d}</div>' for d in docs])
             st.markdown(
@@ -852,7 +852,7 @@ elif st.session_state.nav_page == "chat":
         
         c1, c2, c3 = st.columns([2, 2, 1])
         with c1:
-            all_ds = get_datasets()
+            all_ds = get_datasets(username)
             ds_opts = ["Auto"] + all_ds
             chosen_ds = st.selectbox("📂 Target Dataset", ds_opts, key="chat_ds",
                                      help="For analytics queries — selects which file to analyze")
@@ -876,11 +876,11 @@ elif st.session_state.nav_page == "chat":
                 try:
                     if forced == "analytics":
                         from agents.analytics_agent import run_analytics_agent
-                        r = run_analytics_agent(query, file_path=fp)
+                        r = run_analytics_agent(username, query, file_path=fp)
                         final = {"intent":"analytics","result":r,"error":r.get("error")}
                     elif forced == "knowledge":
                         from agents.knowledge_agent import run_knowledge_agent
-                        r = run_knowledge_agent(query)
+                        r = run_knowledge_agent(username, query)
                         final = {"intent":"knowledge","result":r,"error":r.get("error")}
                     elif forced == "website":
                         from agents.website_testing_agent import run_website_testing_agent
@@ -888,7 +888,7 @@ elif st.session_state.nav_page == "chat":
                         final = {"intent":"website","result":r,"error":r.get("error")}
                     else:
                         from agents.coordinator_agent import process_query
-                        final = process_query(query=query, file_path=fp, url=url_in or None)
+                        final = process_query(username=username, query=query, file_path=fp, url=url_in or None)
                 except Exception as e:
                     msg = str(e)
                     if "429" in msg or "rate" in msg.lower():
@@ -943,14 +943,14 @@ elif st.session_state.nav_page == "chat":
 elif st.session_state.nav_page == "analytics":
     st.markdown('<div class="section-title">📊 Analytics Dashboard</div>', unsafe_allow_html=True)
 
-    all_ds = get_datasets()
+    all_ds = get_datasets(username)
     if not all_ds:
         st.info("📂 No datasets found. Upload a CSV or Excel file from the sidebar.")
     else:
         chosen_name = st.selectbox("📂 Select Dataset", all_ds, key="ana_ds")
 
         try:
-            df = load_df(chosen_name)
+            df = load_df(username, chosen_name)
         except Exception as e:
             st.error(f"Could not load file: {e}")
             st.stop()
@@ -1182,8 +1182,8 @@ elif st.session_state.nav_page == "analytics":
 elif st.session_state.nav_page == "knowledge":
     st.markdown('<div class="section-title">📚 Knowledge Base</div>', unsafe_allow_html=True)
 
-    docs = get_doc_list()
-    chunks = get_chunk_count()
+    docs = get_doc_list(username)
+    chunks = get_chunk_count(username)
 
     if not docs:
         st.warning("No documents uploaded yet. Upload PDF or TXT files from the sidebar.")
@@ -1206,7 +1206,7 @@ elif st.session_state.nav_page == "knowledge":
         else:
             with st.spinner("Searching knowledge base..."):
                 from agents.knowledge_agent import run_knowledge_agent
-                r = run_knowledge_agent(kb_query)
+                r = run_knowledge_agent(username, kb_query)
 
             st.markdown('<span class="badge b-know">📚 Knowledge Agent</span>', unsafe_allow_html=True)
             with st.container(border=True):
