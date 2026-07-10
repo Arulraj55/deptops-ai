@@ -4,10 +4,7 @@ Beautiful UI with proper separation of concerns.
 All agent imports are lazy to avoid Streamlit cache issues.
 """
 
-import sys
-for _mod in list(sys.modules.keys()):
-    if "agents." in _mod or _mod == "config":
-        sys.modules.pop(_mod, None)
+
 
 from pathlib import Path
 try:
@@ -1029,12 +1026,12 @@ elif st.session_state.nav_page == "analytics":
             if att_col:
                 ch3, ch4 = st.columns(2)
                 with ch3:
-                    fig_att = px.histogram(
-                        df_n, x=att_col, nbins=20,
+                    fig_att = px.violin(
+                        df_n, y=att_col, box=True, points="all",
                         color_discrete_sequence=["#3498db"],
                         labels={att_col: "Attendance (%)"},
                     )
-                    fig_att.add_vline(x=75, line_dash="dash", line_color="#e74c3c",
+                    fig_att.add_hline(y=75, line_dash="dash", line_color="#e74c3c",
                                       annotation_text="75% Min")
                     fig_att.update_layout(
                         title=dict(text="📅 Attendance Distribution", font=dict(size=15)),
@@ -1065,20 +1062,35 @@ elif st.session_state.nav_page == "analytics":
                 subj_labels = [k.replace("_", " ").title() for k in sa.keys()]
                 subj_values = list(sa.values())
                 colors_subj = ["#2ecc71" if v >= 60 else "#f39c12" if v >= 40 else "#e74c3c" for v in subj_values]
-                fig_subj = px.bar(
-                    x=subj_labels, y=subj_values,
-                    labels={"x": "Subject", "y": "Average Marks"},
-                    text_auto=True,
-                )
-                fig_subj.update_traces(marker_color=colors_subj)
-                fig_subj.add_hline(y=40, line_dash="dash", line_color="#e74c3c", annotation_text="Pass (40)")
-                fig_subj.add_hline(y=60, line_dash="dot", line_color="#2ecc71", annotation_text="Good (60)")
-                fig_subj.update_layout(
-                    title=dict(text="📚 Subject-wise Average Marks", font=dict(size=15)),
-                    height=400, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    xaxis_tickangle=-30,
-                )
-                st.plotly_chart(fig_subj, use_container_width=True)
+                ch_s1, ch_s2 = st.columns(2)
+                with ch_s1:
+                    fig_subj = px.bar(
+                        x=subj_labels, y=subj_values,
+                        labels={"x": "Subject", "y": "Average Marks"},
+                        text_auto=True,
+                    )
+                    fig_subj.update_traces(marker_color=colors_subj)
+                    fig_subj.add_hline(y=40, line_dash="dash", line_color="#e74c3c", annotation_text="Pass (40)")
+                    fig_subj.add_hline(y=60, line_dash="dot", line_color="#2ecc71", annotation_text="Good (60)")
+                    fig_subj.update_layout(
+                        title=dict(text="📚 Subject-wise Averages (Bar)", font=dict(size=15)),
+                        height=350, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        xaxis_tickangle=-30,
+                    )
+                    st.plotly_chart(fig_subj, use_container_width=True)
+                with ch_s2:
+                    fig_radar = go.Figure(data=go.Scatterpolar(
+                        r=subj_values + [subj_values[0]] if subj_values else [],
+                        theta=subj_labels + [subj_labels[0]] if subj_labels else [],
+                        fill='toself',
+                        marker_color='#9b59b6'
+                    ))
+                    fig_radar.update_layout(
+                        title=dict(text="🕸️ Subject Performance Radar", font=dict(size=15)),
+                        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                        height=350, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
 
             # 4. CGPA
             cgpa_col = next((c for c in ("cgpa", "gpa", "aggregate") if c in df_n.columns), None)
@@ -1170,8 +1182,20 @@ elif st.session_state.nav_page == "analytics":
             else:
                 st.dataframe(df.head(50), use_container_width=True)
 
-        # Full stats expander
+        # Correlation Heatmap
         num_df = df.select_dtypes(include="number")
+        if not num_df.empty and num_df.shape[1] > 1:
+            st.markdown("### 🔗 Correlation Analysis")
+            fig_corr = px.imshow(
+                num_df.corr().round(2), text_auto=True, 
+                color_continuous_scale="RdBu_r", zmin=-1, zmax=1
+            )
+            fig_corr.update_layout(
+                height=450, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+        # Full stats expander
         if not num_df.empty:
             with st.expander("📋 Full Statistical Summary Table"):
                 st.dataframe(num_df.describe().round(2), use_container_width=True)

@@ -287,7 +287,8 @@ def run_analytics_agent(username: str, query: str, file_path: str | None = None)
              "3. Format: bullet points, bold numbers.\n"
              "4. If the data doesn't contain what was asked, say so in one line.\n"
              "5. Do NOT mention AI, LLM, OpenRouter, or rate limits.\n"
-             "6. Do NOT add extra information the user didn't ask for."),
+             "6. Do NOT add extra information the user didn't ask for.\n"
+             "7. Provide zero conversational filler. Give ONLY the direct answer."),
             ("human",
              "DATASET CONTEXT:\n{context}\n\n"
              "QUESTION: {query}\n\n"

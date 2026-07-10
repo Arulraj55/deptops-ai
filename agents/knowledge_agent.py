@@ -265,7 +265,8 @@ def run_knowledge_agent(username: str, query: str, top_k: int = 8) -> dict:
             "3. Include specific numbers, percentages, or rules mentioned in the text.\n"
             "4. If the answer is truly not in the context, say: "
             "'This specific information is not in the uploaded documents.'\n"
-            "5. Never make up information not in the context.",
+            "5. Never make up information not in the context.\n"
+            "6. Do not include any extra context, unsolicited advice, or conversational filler. Only answer exactly what is asked.",
         ),
         ("human", "Question: {query}\n\nDocument context:\n{context}\n\nAnswer:"),
     ])
