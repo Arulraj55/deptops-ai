@@ -96,11 +96,18 @@ def _compute_stats(df: pd.DataFrame) -> dict:
             "attendance_percentage", "att_%", "roll_no", "student_id", "id",
             "classes_held", "classes_attended", "semester"}
     num_cols = [c for c in df.select_dtypes(include="number").columns if c not in skip]
+    
+    academic_keywords = {"pass", "fail", "marks", "cgpa", "gpa", "attendance", "subject", "grade", "course"}
+    is_academic = any(k in c for c in cols for k in academic_keywords)
+
     if num_cols:
         avgs = df[num_cols].mean().round(2).to_dict()
         subj = {k: v for k, v in avgs.items() if 0 <= v <= 100}
         if subj:
-            stats["subject_averages"] = subj
+            if is_academic:
+                stats["subject_averages"] = subj
+            else:
+                stats["generic_averages"] = subj
 
     for fc in ("pass_percentage_class", "avg_student_score", "student_feedback_score"):
         if fc in cols:
@@ -144,6 +151,10 @@ def _build_context(df: pd.DataFrame, stats: dict, filename: str) -> str:
         lines.append("Subject-wise averages:")
         for subj, avg in sorted(stats["subject_averages"].items(), key=lambda x: -x[1]):
             lines.append(f"  {subj.replace('_',' ').title()}: {avg}")
+    if "generic_averages" in stats:
+        lines.append("Numeric column averages:")
+        for col, avg in sorted(stats["generic_averages"].items(), key=lambda x: -x[1]):
+            lines.append(f"  {col.replace('_',' ').title()}: {avg}")
 
     # Sample data (first 5 rows, text form)
     lines.append("")
@@ -210,7 +221,7 @@ def _direct_answer(query: str, stats: dict, df: pd.DataFrame, filename: str) -> 
         else:
             lines.append(f"No CGPA column found in {filename}.")
 
-    elif any(w in q for w in ("subject", "marks", "average", "performance", "weak", "strong", "score")):
+    elif any(w in q for w in ("subject", "marks", "average", "performance", "weak", "strong", "score", "most", "high", "low")):
         if "subject_averages" in stats:
             sa = stats["subject_averages"]
             lines.append(f"**Subject-wise Average Marks — {filename}**")
@@ -223,8 +234,19 @@ def _direct_answer(query: str, stats: dict, df: pd.DataFrame, filename: str) -> 
                 f"\n🏆 Best: **{best.replace('_',' ').title()}** ({sa[best]})",
                 f"⚠️ Weakest: **{worst.replace('_',' ').title()}** ({sa[worst]})",
             ]
+        elif "generic_averages" in stats:
+            sa = stats["generic_averages"]
+            lines.append(f"**Column Averages — {filename}**")
+            for subj, avg in sorted(sa.items(), key=lambda x: -x[1]):
+                lines.append(f"- {subj.replace('_', ' ').title()}: **{avg}**")
+            best = max(sa, key=sa.get)
+            worst = min(sa, key=sa.get)
+            lines += [
+                f"\n🏆 Highest: **{best.replace('_',' ').title()}** ({sa[best]})",
+                f"⚠️ Lowest: **{worst.replace('_',' ').title()}** ({sa[worst]})",
+            ]
         else:
-            lines.append(f"No subject marks columns found in {filename}.")
+            lines.append(f"No numeric columns found for averages in {filename}.")
 
     elif any(w in q for w in ("faculty", "teacher", "professor", "feedback")):
         if "avg_avg_student_score" in stats:

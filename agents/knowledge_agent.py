@@ -73,7 +73,13 @@ def _split(docs: list[Document]) -> list[Document]:
 # ── TF-IDF retrieval ──────────────────────────────────────────────────────────
 
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    stop_words = {
+        "the", "is", "in", "at", "of", "on", "and", "a", "to", "for", "with", 
+        "as", "by", "this", "it", "that", "are", "be", "was", "were", "or", "an",
+        "from", "will", "can", "if", "not", "we", "you", "they", "has", "have"
+    }
+    return [w for w in words if w not in stop_words and len(w) > 2]
 
 
 def _build_tfidf_index(chunks: list[Document]) -> dict:

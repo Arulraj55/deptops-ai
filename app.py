@@ -1166,7 +1166,9 @@ elif st.session_state.nav_page == "analytics":
                 st.markdown("### 📋 Statistical Summary")
                 st.dataframe(num_df.describe().round(2), use_container_width=True)
                 st.markdown("### 📊 Column Distributions")
-                cols_to_plot = num_df.columns[:6]
+                id_keywords = {"id", "no", "num", "reg", "roll", "serial", "sr"}
+                valid_cols = [c for c in num_df.columns if not any(k in c.lower() for k in id_keywords)]
+                cols_to_plot = valid_cols[:6] if valid_cols else num_df.columns[:6]
                 for i in range(0, len(cols_to_plot), 2):
                     row_cols = st.columns(2)
                     for j, col_name in enumerate(cols_to_plot[i:i+2]):
