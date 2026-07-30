@@ -1,29 +1,12 @@
 """
-db_storage.py — Per-user persistent file storage backed by Neon PostgreSQL.
+db_storage.py — Per-user persistent file & history storage backed by Neon PostgreSQL.
 
-Every file (analytics CSV/Excel, knowledge PDF/TXT) and the TF-IDF index
-are scoped to the logged-in user via a username column.
-
-Public API
-----------
-Analytics:
-    save_analytics_file(username, filename, content_bytes)
-    list_analytics_files(username) -> list[dict]   [{filename, uploaded_at}]
-    load_analytics_file(username, filename) -> bytes | None
-    delete_analytics_file(username, filename)
-
-Knowledge:
-    save_knowledge_file(username, filename, content_bytes)
-    list_knowledge_files(username) -> list[str]
-    load_knowledge_file(username, filename) -> bytes | None
-    delete_knowledge_file(username, filename)
-
-TF-IDF index:
-    save_tfidf_index(username, index_json_str)
-    load_tfidf_index(username) -> str | None
+Every file (analytics CSV/Excel, knowledge PDF/TXT/DOCX/MD), reports, scan history,
+and chat messages are scoped to the logged-in user via a username column.
 """
 
 import os
+import json
 import psycopg2
 from dotenv import load_dotenv
 
@@ -35,23 +18,12 @@ def _conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
-# ── Schema migration (called once on boot from auth._init_db) ─────────────────
-
 def migrate_add_username_columns() -> None:
-    """
-    Safely add `username` column to existing tables if missing.
-    Uses ALTER TABLE ... ADD COLUMN IF NOT EXISTS (PostgreSQL 9.6+).
-    Existing rows get username = 'legacy' so they don't break.
-    Also rebuilds the UNIQUE constraints to be per-user.
-    """
+    """Safely ensure all username columns exist across tables."""
     stmts = [
-        # analytics_files
         "ALTER TABLE analytics_files ADD COLUMN IF NOT EXISTS username VARCHAR(80) NOT NULL DEFAULT 'legacy'",
-        # knowledge_files
         "ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS username VARCHAR(80) NOT NULL DEFAULT 'legacy'",
-        # tfidf_index
         "ALTER TABLE tfidf_index ADD COLUMN IF NOT EXISTS username VARCHAR(80) NOT NULL DEFAULT 'legacy'",
-        # Drop old single-column unique constraints (best-effort, ignore if missing)
     ]
     with _conn() as con:
         with con.cursor() as cur:
@@ -186,3 +158,68 @@ def load_tfidf_index(username: str) -> str | None:
             )
             row = cur.fetchone()
     return row[0] if row else None
+
+
+# ── Website Scan History ──────────────────────────────────────────────────────
+
+def save_website_scan(username: str, url: str, overall_score: int, scores_dict: dict, report_text: str) -> None:
+    """Save website testing scan result."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """INSERT INTO website_scan_history (username, url, overall_score, scores_json, report_text)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (username, url, overall_score, json.dumps(scores_dict), report_text)
+            )
+        con.commit()
+
+
+def get_latest_website_scan(username: str, url: str | None = None) -> dict | None:
+    """Fetch the latest scan record for user."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            if url:
+                cur.execute(
+                    "SELECT url, overall_score, scores_json, report_text, created_at FROM website_scan_history WHERE username = %s AND url = %s ORDER BY id DESC LIMIT 1",
+                    (username, url)
+                )
+            else:
+                cur.execute(
+                    "SELECT url, overall_score, scores_json, report_text, created_at FROM website_scan_history WHERE username = %s ORDER BY id DESC LIMIT 1",
+                    (username,)
+                )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "url": row[0],
+        "overall_score": row[1],
+        "scores": json.loads(row[2]) if row[2] else {},
+        "report": row[3],
+        "created_at": row[4],
+    }
+
+
+# ── Unified Chat History ──────────────────────────────────────────────────────
+
+def add_chat_message(username: str, role: str, message: str, agent_used: str = "coordinator") -> None:
+    """Store chat message in PostgreSQL."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "INSERT INTO chat_history (username, role, message, agent_used) VALUES (%s, %s, %s, %s)",
+                (username, role, message, agent_used)
+            )
+        con.commit()
+
+
+def get_chat_history(username: str, limit: int = 50) -> list[dict]:
+    """Retrieve chat history for the user."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "SELECT role, message, agent_used, created_at FROM chat_history WHERE username = %s ORDER BY id ASC LIMIT %s",
+                (username, limit)
+            )
+            rows = cur.fetchall()
+    return [{"role": r[0], "message": r[1], "agent_used": r[2], "created_at": r[3]} for r in rows]

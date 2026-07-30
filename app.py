@@ -1,17 +1,14 @@
 """
 DeptOps AI — Streamlit Dashboard
-Beautiful UI with proper separation of concerns.
-All agent imports are lazy to avoid Streamlit cache issues.
+Agentic AI Assistant for NAAC Department Preparation
+Powered by Gemini 2.5 Flash
 """
 
-
-
 from pathlib import Path
-try:
-    import streamlit as st
-except ImportError as e:
-    raise ImportError("Streamlit is required. Install with 'pip install streamlit'") from e
-
+import io
+import json
+import logging
+import streamlit as st
 import pandas as pd
 
 try:
@@ -20,17 +17,21 @@ try:
 except ImportError as e:
     raise ImportError("Plotly is required for visualizations. Install with 'pip install plotly'") from e
 
-from config import OPENROUTER_MODEL
+from config import GEMINI_MODEL
 from auth import auth_gate
 import db_storage
 
-# ── Page config ───────────────────────────────────────────────────────────────
+logger = logging.getLogger("DeptOpsAI-App")
+
+# ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="DeptOps AI", page_icon="🎓",
-    layout="wide", initial_sidebar_state="expanded"
+    page_title="DeptOps AI — NAAC Department Assistant",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
+# ── Modern CSS Theme ─────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 :root {
@@ -39,11 +40,11 @@ st.markdown("""
     --page-bg: var(--background-color);
     --surface: var(--secondary-background-color);
     --text: var(--text-color);
-    --edge: rgba(127, 127, 127, 0.28);
+    --edge: rgba(127, 127, 127, 0.25);
 }
 
 html, body, [class*="css"] {
-    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-family: system-ui, -apple-system, 'Space Grotesk', 'Segoe UI', sans-serif;
     color: var(--text);
 }
 
@@ -61,51 +62,14 @@ button[kind="header"], [data-testid="stHeader"], .stAppHeader {
 }
 
 .block-container {
-    padding-top: 1.15rem !important;
-    max-width: 1240px;
+    padding-top: 1.1rem !important;
+    max-width: 1280px;
 }
 
-[data-testid="stSidebar"] .block-container {
-    padding-top: 0.85rem !important;
-}
-
-[data-testid="stSidebarHeader"] {
-    display: none !important;
-}
-
-.app-topbar-brand {
-    font-size: 1.05rem;
-    font-weight: 700;
-    line-height: 1.2;
-}
-.app-topbar-model {
-    font-size: 0.74rem;
-    opacity: 0.78;
-    margin-top: 2px;
-}
-.app-topbar-user {
-    text-align: right;
-    font-size: 0.84rem;
-    font-weight: 600;
-    line-height: 1.25;
-}
-.app-topbar-user span {
-    display: block;
-    font-size: 0.72rem;
-    font-weight: 500;
-    opacity: 0.75;
-}
-
-.top-nav {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.1rem 0 0.45rem;
-    margin-bottom: 0.8rem;
-}
+/* Navigation buttons */
 button[kind="primary"], button[kind="secondary"] {
     border-radius: 999px !important;
-    padding: 0.62rem 1rem !important;
+    padding: 0.6rem 1rem !important;
     font-weight: 700 !important;
     letter-spacing: 0.01em;
     border: 1px solid transparent !important;
@@ -113,23 +77,21 @@ button[kind="primary"], button[kind="secondary"] {
 button[kind="primary"] {
     background: linear-gradient(135deg, var(--accent), var(--accent-2)) !important;
     color: #ffffff !important;
-    box-shadow: 0 12px 24px rgba(15, 157, 138, 0.18);
+    box-shadow: 0 10px 20px rgba(15, 157, 138, 0.2);
 }
 button[kind="secondary"] {
     background: rgba(127, 127, 127, 0.10) !important;
     color: var(--text) !important;
 }
-button[kind="primary"]:hover,
-button[kind="secondary"]:hover {
-    transform: translateY(-1px);
-}
+
+/* User Profile Chip */
 .profile-chip {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     justify-content: center;
-    border-radius: 11px;
-    padding: 0.45rem 0.8rem;
+    border-radius: 12px;
+    padding: 0.4rem 0.8rem;
     background: var(--surface);
     border: 1px solid var(--edge);
     height: 100%;
@@ -142,492 +104,102 @@ button[kind="secondary"]:hover {
     align-items: center;
     justify-content: center;
     font-weight: 700;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     color: #fff;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    flex: 0 0 auto;
-}
-.profile-meta {
-    min-width: 0;
-    text-align: left;
-}
-.profile-meta strong {
-    display: block;
-    font-size: 0.8rem;
-    line-height: 1.1;
-}
-.profile-meta span {
-    display: block;
-    font-size: 0.65rem;
-    opacity: 0.76;
-    line-height: 1.1;
-}
-/* Global readability */
-section[data-testid="stMain"],
-section[data-testid="stMain"] * {
-    color: var(--text);
 }
 
-/* Sidebar */
+/* Sidebar Branding */
 [data-testid="stSidebar"] {
     background: var(--surface) !important;
     border-right: 1px solid var(--edge) !important;
-}
-[data-testid="stSidebar"] .block-container {
-    padding-top: 1.5rem !important;
-}
-[data-testid="stSidebar"] * {
-    color: var(--text) !important;
 }
 [data-testid="stSidebar"] .sidebar-brand {
     display: flex;
     align-items: center;
     gap: 0.85rem;
-    padding: 0.15rem 0 0.35rem;
-    margin-bottom: 2rem;
+    padding: 0.2rem 0 0.5rem;
+    margin-bottom: 1.5rem;
 }
 [data-testid="stSidebar"] .sidebar-brand-mark {
-    width: 2.7rem;
-    height: 2.7rem;
-    border-radius: 16px;
+    width: 2.6rem;
+    height: 2.6rem;
+    border-radius: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
     color: #fff;
-    font-size: 1.15rem;
-    box-shadow: 0 10px 22px rgba(15, 157, 138, 0.18);
-}
-[data-testid="stSidebar"] .sidebar-brand-title {
-    font-family: 'Space Grotesk', sans-serif !important;
-    font-size: 1rem;
-    font-weight: 800;
-    line-height: 1.2;
-}
-[data-testid="stSidebar"] .sidebar-brand-subtitle {
-    font-size: 0.76rem;
-    opacity: 0.76;
-    margin-top: 0.2rem;
-}
-[data-testid="stSidebar"] .sidebar-section {
-    margin-top: 0.8rem;
-    padding: 0.9rem 1rem 1rem;
-    border: 1px solid var(--edge);
-    border-radius: 18px;
-    background: rgba(127, 127, 127, 0.06);
-}
-[data-testid="stSidebar"] .sidebar-gap {
-    height: 0.6rem;
-}
-[data-testid="stSidebar"] .stMarkdown h3 {
-    font-family: 'Space Grotesk', sans-serif !important;
-    font-weight: 700 !important;
-}
-[data-testid="stSidebar"] .stCaption {
-    opacity: 0.85;
-}
-[data-testid="stSidebar"] .stFileUploader {
-    margin-top: 0.4rem;
-}
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
-    background: transparent !important;
-    border: 1.5px dashed var(--edge) !important;
-    border-radius: 14px !important;
-    padding: 1rem !important;
-}
-[data-testid="stSidebar"] .stButton > button {
-    border-radius: 14px !important;
-    padding: 0.7rem 0.95rem !important;
+    font-size: 1.2rem;
 }
 
-/* Tabs */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 6px;
-    background: var(--surface);
-    border: 1px solid var(--edge);
-    border-radius: 16px;
-    padding: 6px;
-    margin-bottom: 1.5rem;
-}
-.stTabs [data-baseweb="tab"] {
-    font-family: 'Space Grotesk', sans-serif !important;
-    font-size: 0.9rem !important;
-    color: var(--text) !important;
-    border-radius: 10px !important;
-    padding: 10px 18px !important;
-    opacity: 0.9;
-}
-.stTabs [data-baseweb="tab"]:hover {
-    background: rgba(127, 127, 127, 0.12) !important;
-    opacity: 1;
-}
-.stTabs [aria-selected="true"] {
-    background: linear-gradient(135deg, var(--accent), var(--accent-2)) !important;
-    color: #ffffff !important;
-    opacity: 1;
-}
-.stTabs [data-baseweb="tab-highlight"],
-.stTabs [data-baseweb="tab-border"] {
-    display: none !important;
-}
-
-/* Hero */
+/* Hero Cards */
 .hero {
-    background: linear-gradient(130deg, rgba(15,157,138,0.16), rgba(47,124,184,0.16));
+    background: linear-gradient(130deg, rgba(15,157,138,0.15), rgba(47,124,184,0.15));
     border: 1px solid var(--edge);
-    border-radius: 24px;
-    padding: 34px 38px;
-    margin-bottom: 26px;
-    color: var(--text);
-    box-shadow: 0 10px 26px rgba(0,0,0,0.12);
-    position: relative;
-    overflow: hidden;
-}
-.hero::before,
-.hero::after {
-    content: '';
-    position: absolute;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.22);
-}
-.hero::before {
-    top: -72px;
-    right: -44px;
-    width: 240px;
-    height: 240px;
-}
-.hero::after {
-    bottom: -76px;
-    right: 112px;
-    width: 170px;
-    height: 170px;
+    border-radius: 20px;
+    padding: 28px 32px;
+    margin-bottom: 22px;
 }
 .hero h1 {
-    margin: 0 0 10px;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 2.15rem;
-    font-weight: 700;
+    margin: 0 0 8px;
+    font-size: 2rem;
+    font-weight: 800;
 }
 .hero p {
     margin: 0;
-    line-height: 1.7;
-    opacity: 0.95;
-}
-.hero-pill {
-    display: inline-block;
-    padding: 4px 14px;
-    border-radius: 20px;
-    border: 1px solid var(--edge);
-    background: rgba(255,255,255,0.3);
-    font-size: 0.78rem;
-    font-weight: 700;
-    margin-bottom: 14px;
-}
-
-/* Cards */
-.agent-card,
-.step-card,
-.data-card,
-.chat-answer,
-[data-testid="stMetric"],
-.streamlit-expanderHeader {
-    background: var(--surface) !important;
-    border: 1px solid var(--edge) !important;
-    color: var(--text) !important;
-}
-
-.agent-card {
-    border-radius: 20px;
-    padding: 26px 22px;
-    text-align: center;
-    transition: all 0.2s ease;
-    box-shadow: 0 8px 22px rgba(0,0,0,0.12);
-    height: 100%;
-}
-.agent-card:hover {
-    transform: translateY(-5px);
-}
-.agent-icon {
-    width: 60px;
-    height: 60px;
-    border-radius: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.8rem;
-    margin: 0 auto 16px;
-}
-.icon-blue  { background: linear-gradient(135deg,#d6eef9,#9cd2eb); }
-.icon-amber { background: linear-gradient(135deg,#feeac6,#f7c772); }
-.icon-green { background: linear-gradient(135deg,#cbf5e8,#88e4c6); }
-.icon-purple{ background: linear-gradient(135deg,#dce2ff,#b3c3ff); }
-.agent-card h3 {
-    margin: 0 0 10px;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 1.04rem;
-}
-.agent-card p {
     opacity: 0.9;
+    line-height: 1.6;
 }
 
-.section-title {
-    font-size: 1.14rem;
-    font-family: 'Space Grotesk', sans-serif;
-    font-weight: 700;
-    margin: 32px 0 16px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.section-title::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: var(--edge);
-    margin-left: 8px;
-}
-
-.stat-strip {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-top: 20px;
-}
-.stat-pill {
-    background: var(--surface);
-    border: 1px solid var(--edge);
-    border-radius: 12px;
-    padding: 10px 18px;
-    text-align: center;
-    min-width: 90px;
-}
-.stat-pill .sp-val {
-    font-size: 1.4rem;
-    font-weight: 800;
-    line-height: 1;
-}
-.stat-pill .sp-lbl {
-    font-size: 0.7rem;
-    opacity: 0.8;
-    font-weight: 600;
-    margin-top: 2px;
-    text-transform: uppercase;
-}
-
+/* Badges */
 .badge {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 14px;
+    padding: 5px 12px;
     border-radius: 20px;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
     font-weight: 600;
-    margin-bottom: 14px;
+    margin-bottom: 10px;
 }
-.b-ana  { background: rgba(15,157,138,0.18); border: 1px solid var(--edge); }
-.b-know { background: rgba(244,165,63,0.18); border: 1px solid var(--edge); }
-.b-web  { background: rgba(47,124,184,0.18); border: 1px solid var(--edge); }
+.b-ana  { background: rgba(15,157,138,0.2); border: 1px solid var(--edge); }
+.b-know { background: rgba(244,165,63,0.2); border: 1px solid var(--edge); }
+.b-web  { background: rgba(47,124,184,0.2); border: 1px solid var(--edge); }
 
-[data-testid="stMetric"] {
-    border-radius: 14px;
-    padding: 16px 20px !important;
-}
-[data-testid="stMetricLabel"] {
-    text-transform: uppercase !important;
-    font-size: 0.72rem !important;
-    letter-spacing: 0.6px !important;
-}
-
-/* Inputs and selectors must always inherit theme text */
-.stTextInput input,
-.stTextArea textarea,
-.stSelectbox [data-baseweb="select"] > div,
-.stSelectbox [data-baseweb="select"] input,
-.stSelectbox [data-baseweb="select"] span {
-    background: var(--surface) !important;
-    color: var(--text) !important;
-    -webkit-text-fill-color: var(--text) !important;
-    border-color: var(--edge) !important;
-}
-.stTextInput input::placeholder,
-.stTextArea textarea::placeholder {
-    opacity: 0.7 !important;
-}
-
-.stButton > button {
-    border-radius: 11px !important;
-    font-weight: 600 !important;
-    white-space: nowrap !important;
-    padding-left: 0.2rem !important;
-    padding-right: 0.2rem !important;
-}
-.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, var(--accent), var(--accent-2)) !important;
-    border: none !important;
-    color: #ffffff !important;
-}
-
-.step-card {
+/* Score Cards */
+.score-card {
+    background: var(--surface);
+    border: 1px solid var(--edge);
     border-radius: 16px;
-    padding: 20px;
-    margin-bottom: 12px;
-    display: flex;
-    gap: 14px;
-    align-items: flex-start;
+    padding: 16px;
+    text-align: center;
 }
-.step-num {
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    color: #ffffff;
-    border-radius: 8px;
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+.score-val {
+    font-size: 1.8rem;
+    font-weight: 800;
+    color: var(--accent);
+}
+.score-lbl {
+    font-size: 0.75rem;
+    opacity: 0.8;
+    text-transform: uppercase;
     font-weight: 700;
-    font-size: 0.85rem;
-    flex-shrink: 0;
-}
-.step-text {
-    line-height: 1.55;
-}
-
-.data-card {
-    border-radius: 16px;
-    padding: 20px;
-}
-.data-card h4 {
-    margin: 0 0 12px;
-    font-size: 0.95rem;
-    font-family: 'Space Grotesk', sans-serif;
-}
-.data-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 0;
-    border-bottom: 1px solid var(--edge);
-    font-size: 0.88rem;
-}
-.data-item:last-child {
-    border-bottom: none;
-}
-
-[data-testid="stVerticalBlock"] > div {
-    /* animation removed — caused page-change lag */
-}
-
-@media (max-width: 900px) {
-    .hero {
-        padding: 26px 22px;
-        border-radius: 18px;
-    }
-    .hero h1 {
-        font-size: 1.72rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        padding: 9px 12px !important;
-        font-size: 0.83rem !important;
-    }
+    margin-top: 4px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Auth gate ───────────────────────────────────────────────────────────────────────────────
+# ── Auth Gate ─────────────────────────────────────────────────────────────────
 auth_gate()
 
-# ── Helper functions ──────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=60, show_spinner=False)
-def load_df(username: str, filename: str) -> pd.DataFrame:
-    """Load a dataframe from DB by username + filename. Cached 60s per user."""
-    import io
-    content = db_storage.load_analytics_file(username, filename)
-    if content is None:
-        raise FileNotFoundError(f"File '{filename}' not found in database.")
-    buf = io.BytesIO(content)
-    p = Path(filename)
-    return pd.read_csv(buf) if p.suffix.lower() == ".csv" else pd.read_excel(buf)
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_datasets(username: str) -> list[str]:
-    """Return list of analytics filenames for this user. Cached 30s."""
-    try:
-        return [row["filename"] for row in db_storage.list_analytics_files(username)]
-    except Exception:
-        return []
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_doc_list(username: str) -> list[str]:
-    """Return list of knowledge document filenames for this user. Cached 30s."""
-    try:
-        return db_storage.list_knowledge_files(username)
-    except Exception:
-        return []
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_chunk_count(username: str) -> int:
-    try:
-        import json
-        from db_storage import load_tfidf_index
-        raw = load_tfidf_index(username)
-        if raw is None:
-            return 0
-        return json.loads(raw).get("N", 0)
-    except Exception:
-        return 0
-
-def compute_stats(df: pd.DataFrame) -> dict:
-    stats = {}
-    df = df.copy()
-    df.columns = [str(c).strip().lower().replace(" ","_") for c in df.columns]
-    cols = df.columns.tolist()
-    for rc in ("result","status","pass_fail"):
-        if rc in cols:
-            counts = df[rc].astype(str).str.strip().str.upper().value_counts()
-            total = len(df)
-            p = int(counts.get("PASS", counts.get("P",0)))
-            f = int(counts.get("FAIL", counts.get("F",0)))
-            stats.update({"total_students":total,"pass_count":p,"fail_count":f,
-                "pass_percentage":round(p/total*100,2) if total else 0,
-                "fail_percentage":round(f/total*100,2) if total else 0})
-            break
-    for ac in ("attendance","attendance_percentage","att_%"):
-        if ac in cols:
-            stats["avg_attendance"]=round(float(df[ac].mean()),2)
-            stats["below_75_count"]=int((df[ac]<75).sum())
-            stats["below_75_pct"]=round(stats["below_75_count"]/len(df)*100,2) if len(df) else 0
-            stats["eligible_exam_count"]=int((df[ac]>=75).sum())
-            break
-    for gc in ("cgpa","gpa","aggregate"):
-        if gc in cols:
-            stats["avg_cgpa"]=round(float(df[gc].mean()),2)
-            stats["placement_eligible"]=int((df[gc]>=6.0).sum())
-            stats["placement_eligible_pct"]=round(stats["placement_eligible"]/len(df)*100,2)
-            break
-    for pc in ("placed","placement_status"):
-        if pc in cols:
-            pc_c = df[pc].astype(str).str.strip().str.upper().value_counts()
-            placed=int(pc_c.get("YES",pc_c.get("Y",0)))
-            total=stats.get("total_students",len(df))
-            stats.update({"placed_count":placed,"total_students":total,
-                "placement_rate_pct":round(placed/total*100,2) if total else 0})
-            break
-    skip={"total_marks","average_marks","cgpa","gpa","aggregate","attendance",
-          "attendance_percentage","att_%","roll_no","student_id","id",
-          "classes_held","classes_attended","semester"}
-    num_cols=[c for c in df.select_dtypes(include="number").columns if c not in skip]
-    if num_cols:
-        avgs=df[num_cols].mean().round(2).to_dict()
-        subj={k:v for k,v in avgs.items() if 0<=v<=100}
-        if subj: stats["subject_averages"]=subj
-    return stats
-
+# ── User Context ──────────────────────────────────────────────────────────────
 full_name = st.session_state.get("full_name", "HOD")
 username = st.session_state.get("username", "hod")
 
 if "nav_page" not in st.session_state:
-    st.session_state.nav_page = "home"
+    st.session_state.nav_page = "coordinator"
+
 
 def _logout():
     for k in ("authenticated", "username", "full_name"):
@@ -639,20 +211,48 @@ def _set_nav(page: str):
 
 
 def _profile_initials(name: str) -> str:
-    parts = [part for part in name.split() if part]
-    if not parts:
-        return "H"
-    return (parts[0][0] + (parts[1][0] if len(parts) > 1 else "")).upper()
+    parts = [p for p in name.split() if p]
+    return (parts[0][0] + (parts[1][0] if len(parts) > 1 else "")).upper() if parts else "H"
 
-nav_cols = st.columns([1, 1, 1, 1, 1, 1, 2, 0.8])
+
+# Cached DB Helpers
+@st.cache_data(ttl=30, show_spinner=False)
+def get_datasets(user: str) -> list[str]:
+    try:
+        return [row["filename"] for row in db_storage.list_analytics_files(user)]
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_doc_list(user: str) -> list[str]:
+    try:
+        return db_storage.list_knowledge_files(user)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_chunk_count(user: str) -> int:
+    try:
+        raw = db_storage.load_tfidf_index(user)
+        if not raw:
+            return 0
+        idx = json.loads(raw)
+        return len(idx.get("chunks", []))
+    except Exception:
+        return 0
+
+
+# ── Top Navigation Bar ────────────────────────────────────────────────────────
+nav_cols = st.columns([1.2, 1.2, 1.2, 1.2, 2.2, 0.8])
 nav_items = [
-    ("🏠 Home", "home"),
-    ("💬 Chat", "chat"),
+    ("🧠 Coordinator", "coordinator"),
     ("📊 Analytics", "analytics"),
     ("📚 Knowledge", "knowledge"),
-    ("🌐 Website", "website"),
-    ("ℹ️ About", "about"),
+    ("🌐 Website Testing", "website"),
 ]
+
 for idx, (label, page) in enumerate(nav_items):
     with nav_cols[idx]:
         st.button(
@@ -664,697 +264,372 @@ for idx, (label, page) in enumerate(nav_items):
             args=(page,),
         )
 
-with nav_cols[6]:
+with nav_cols[4]:
     st.markdown(
         f"""
         <div class="profile-chip">
             <div class="profile-avatar">{_profile_initials(full_name)}</div>
-            <div class="profile-meta">
-                <strong>{full_name}</strong>
-                <span>@{username}</span>
+            <div>
+                <strong style="font-size: 0.8rem; display: block;">{full_name}</strong>
+                <span style="font-size: 0.68rem; opacity: 0.75; display: block;">@{username} | {GEMINI_MODEL}</span>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-with nav_cols[7]:
+with nav_cols[5]:
     st.button("Logout", key="logout_btn", use_container_width=True, on_click=_logout)
 
-st.markdown('<div class="sidebar-gap"></div>', unsafe_allow_html=True)
+st.markdown('<div style="height: 12px;"></div>', unsafe_allow_html=True)
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+# ── Sidebar File & URL Upload Cards ─────────────────────────────────────────
 with st.sidebar:
-    st.markdown('<div style="height: 10px;"></div>', unsafe_allow_html=True)
     st.markdown(
         """
         <div class="sidebar-brand">
             <div class="sidebar-brand-mark">🎓</div>
             <div>
-                <div class="sidebar-brand-title">DeptOps AI</div>
-                <div class="sidebar-brand-subtitle">Academic ops workspace</div>
+                <div style="font-weight: 800; font-size: 1.05rem;">DeptOps AI</div>
+                <div style="font-size: 0.75rem; opacity: 0.8;">NAAC Accreditation Suite</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    # 1. Dataset Upload
     with st.container(border=True):
-        st.markdown("**📂 Upload Dataset**")
-        st.caption("CSV/Excel → Analytics Agent")
-        up_csv = st.file_uploader("", type=["csv","xlsx","xls"], key="up_csv", label_visibility="collapsed")
+        st.markdown("**📊 Upload Dataset**")
+        st.caption("Excel / CSV → Analytics Agent")
+        up_csv = st.file_uploader("", type=["csv", "xlsx", "xls"], key="up_csv", label_visibility="collapsed")
         if up_csv:
             db_storage.save_analytics_file(username, up_csv.name, up_csv.getbuffer().tobytes())
-            st.success(f"✅ {up_csv.name}")
+            st.success(f"✅ Saved `{up_csv.name}`")
+            get_datasets.clear()
 
-    st.markdown('<div class="sidebar-gap"></div>', unsafe_allow_html=True)
+    st.markdown('<div style="height: 8px;"></div>', unsafe_allow_html=True)
 
+    # 2. Document Upload
     with st.container(border=True):
-        st.markdown("**📄 Upload Document**")
-        st.caption("PDF/TXT → Knowledge Base Agent")
-        up_doc = st.file_uploader("", type=["pdf","txt"], key="up_doc", label_visibility="collapsed")
+        st.markdown("**📚 Upload Document**")
+        st.caption("PDF / DOCX / TXT / MD → Knowledge Base")
+        up_doc = st.file_uploader("", type=["pdf", "docx", "txt", "md"], key="up_doc", label_visibility="collapsed")
         if up_doc:
             db_storage.save_knowledge_file(username, up_doc.name, up_doc.getbuffer().tobytes())
-            st.success(f"✅ {up_doc.name} saved")
-            st.info("👆 Click 'Re-index' below to make it searchable")
+            st.success(f"✅ Saved `{up_doc.name}`")
+            get_doc_list.clear()
 
         docs = get_doc_list(username)
-        if docs:
-            st.caption(f"📚 Documents: {', '.join(docs)}")
         chunks = get_chunk_count(username)
-        st.caption(f"🔢 Indexed chunks: {chunks}" if chunks else "⚠️ Not indexed yet")
+        if docs:
+            st.caption(f"📚 Documents ({len(docs)}): {', '.join(docs)}")
+        st.caption(f"🔢 Indexed Chunks: {chunks}" if chunks else "⚠️ Click Re-index to enable RAG")
 
         if st.button("🔄 Re-index Knowledge Base", use_container_width=True, type="secondary"):
             with st.spinner("Indexing documents..."):
                 from agents.knowledge_agent import ingest_documents
                 res = ingest_documents(username)
+                get_chunk_count.clear()
             if res["success"]:
                 st.success(res["message"])
             else:
                 st.error(res["message"])
 
-    st.markdown('<div class="sidebar-gap"></div>', unsafe_allow_html=True)
-    with st.container(border=True):
-        st.markdown("**🎯 Force Agent**")
-        agent_choice = st.radio("Select Agent", ["🤖 Auto-detect","📊 Analytics","📚 Knowledge Base","🌐 Website Testing"],
-                                index=0, label_visibility="collapsed")
 
-
-# ── Navigation content ────────────────────────────────────────────────────────
-
-
-# ════════════════════════════════════════════════════════════════
-# HOME
-# ════════════════════════════════════════════════════════════════
-if st.session_state.nav_page == "home":
+# ═════════════════════════════════════════════════════════════════════════════
+# PAGE 1: CENTRAL COORDINATOR HUB
+# ═════════════════════════════════════════════════════════════════════════════
+if st.session_state.nav_page == "coordinator":
     st.markdown("""
-<div class="hero">
-    <span class="hero-pill">Academic Intelligence Workspace</span>
-  <h1>🎓 DeptOps AI</h1>
-  <p>Agentic AI Assistant for Academic Department Management<br>
-  Powered by LangGraph · OpenRouter · Playwright · ChromaDB</p>
-    <div class="stat-strip">
-        <div class="stat-pill"><div class="sp-val">4</div><div class="sp-lbl">Agents</div></div>
-        <div class="stat-pill"><div class="sp-val">1</div><div class="sp-lbl">Unified UI</div></div>
-        <div class="stat-pill"><div class="sp-val">24/7</div><div class="sp-lbl">Assistant</div></div>
+    <div class="hero">
+        <span style="font-size:0.75rem; font-weight:700; background:rgba(255,255,255,0.25); padding:4px 12px; border-radius:12px;">Central Intelligence Engine</span>
+        <h1>🎓 DeptOps AI Coordinator</h1>
+        <p>AI Assistant for NAAC Department Inspection Preparation.<br>
+        Ask questions, upload files, or paste website URLs — Coordinator automatically invokes the right specialist agent.</p>
     </div>
-</div>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("""<div class="agent-card">
-<div class="agent-icon icon-blue">📊</div>
-<h3>Analytics Agent</h3>
-<p>Upload CSV/Excel datasets. Ask about pass percentage, attendance, CGPA, placement stats, subject performance.</p>
-</div>""", unsafe_allow_html=True)
-    with c2:
-        st.markdown("""<div class="agent-card">
-<div class="agent-icon icon-amber">📚</div>
-<h3>Knowledge Base Agent</h3>
-<p>Upload PDF/TXT documents (regulations, syllabus, handbooks). Ask policy questions — get answers from your docs.</p>
-</div>""", unsafe_allow_html=True)
-    with c3:
-        st.markdown("""<div class="agent-card">
-<div class="agent-icon icon-green">🌐</div>
-<h3>Website Testing Agent</h3>
-<p>Enter any department website URL. Checks broken links, slow pages, JS errors automatically.</p>
-</div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">📌 Quick Start</div>', unsafe_allow_html=True)
-    q1, q2 = st.columns(2)
-    with q1:
-        st.markdown("""
-<div class="step-card">
-    <div class="step-num">1</div>
-    <div class="step-text"><strong>Upload your data</strong><br>Use the sidebar to add CSV/Excel datasets and PDF/TXT documents.</div>
-</div>
-<div class="step-card">
-    <div class="step-num">2</div>
-    <div class="step-text"><strong>Index documents</strong><br>Click <em>Re-index Knowledge Base</em> after uploading policy documents.</div>
-</div>
-<div class="step-card">
-    <div class="step-num">3</div>
-    <div class="step-text"><strong>Ask in natural language</strong><br>Use Chat for auto-routing or open a dedicated tab for focused work.</div>
-</div>
-        """, unsafe_allow_html=True)
-    with q2:
-        st.markdown("""
-<div class="step-card">
-    <div class="step-num">4</div>
-    <div class="step-text"><strong>Track key outcomes</strong><br>Visual dashboards highlight pass rates, attendance risk, CGPA bands, and placement health.</div>
-</div>
-<div class="step-card">
-    <div class="step-num">5</div>
-    <div class="step-text"><strong>Run website audits</strong><br>Test department portals for broken links, performance issues, and JavaScript errors.</div>
-</div>
-<div class="step-card">
-    <div class="step-num">6</div>
-    <div class="step-text"><strong>Act faster</strong><br>Use findings and cited answers to make confident operational decisions.</div>
-</div>
-        """, unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">📁 Current Data</div>', unsafe_allow_html=True)
-    d1, d2 = st.columns(2)
-    with d1:
-        datasets = get_datasets(username)
-        if datasets:
-            dataset_items = "".join([f'<div class="data-item">✅ {d}</div>' for d in datasets])
-            st.markdown(f'<div class="data-card"><h4>📊 Datasets Ready</h4>{dataset_items}</div>', unsafe_allow_html=True)
-        else:
-            st.warning("No datasets uploaded yet. Upload CSV/Excel from sidebar.")
-    with d2:
-        docs = get_doc_list(username)
-        chunks = get_chunk_count(username)
-        if docs:
-            doc_items = "".join([f'<div class="data-item">✅ {d}</div>' for d in docs])
-            st.markdown(
-                f'<div class="data-card"><h4>📚 Documents Ready</h4>{doc_items}<div class="data-item">🔎 Indexed chunks: {chunks if chunks else 0}</div></div>',
-                unsafe_allow_html=True
-            )
-            if not chunks:
-                st.caption("⚠️ Not indexed yet — click Re-index")
-        else:
-            st.warning("No documents uploaded yet. Upload PDF/TXT from sidebar.")
-
-# ════════════════════════════════════════════════════════════════
-# CHAT
-# ════════════════════════════════════════════════════════════════
-elif st.session_state.nav_page == "chat":
-    st.markdown('<div class="section-title">💬 Ask DeptOps AI</div>', unsafe_allow_html=True)
-
+    # URL Quick Input Card
     with st.container(border=True):
-        query = st.text_area("What would you like to know?", height=120, key="chat_q",
-            placeholder="Examples:\n• What is the pass percentage of students?\n• What is the minimum attendance required?\n• Which subject has the lowest average marks?")
-        
-        c1, c2, c3 = st.columns([2, 2, 1])
-        with c1:
+        st.markdown("### 🌐 Quick Website Audit Input")
+        col_u1, col_u2 = st.columns([3, 1])
+        with col_u1:
+            quick_url = st.text_input("Enter Department Website URL", placeholder="https://cs.university.edu", key="quick_url", label_visibility="collapsed")
+        with col_u2:
+            btn_quick_web = st.button("Analyze Website 🔍", type="primary", use_container_width=True, key="go_quick_web")
+
+    if btn_quick_web and quick_url.strip():
+        with st.spinner(f"Crawling and auditing {quick_url}..."):
+            progress_bar = st.progress(0, text="Initializing crawl...")
+            for p in range(20, 100, 20):
+                time_step = 0.2
+                progress_bar.progress(p, text=f"Auditing web pages... ({p}%)")
+            from agents.website_testing_agent import run_website_testing_agent
+            web_res = run_website_testing_agent(quick_url.strip(), username=username)
+            progress_bar.progress(100, text="Audit Complete!")
+
+        st.session_state.last_coord_result = {"intent": "website", "result": web_res, "query": f"Website Audit for {quick_url}"}
+
+    # Query Input Box
+    with st.container(border=True):
+        st.markdown("### 💬 Ask Coordinator")
+        coord_query = st.text_area("Ask any query, dataset question, or NAAC policy request:", height=100, key="coord_q",
+                                   placeholder="Examples:\n• Compare placement statistics across recent years\n• What is the attendance requirement for exam eligibility according to regulations?\n• Audit department website https://cs.university.edu")
+
+        c_ds, c_btn = st.columns([3, 1])
+        with c_ds:
             all_ds = get_datasets(username)
-            ds_opts = ["Auto"] + all_ds
-            chosen_ds = st.selectbox("📂 Target Dataset", ds_opts, key="chat_ds",
-                                     help="For analytics queries — selects which file to analyze")
-            fp = None
-            if chosen_ds != "Auto":
-                fp = chosen_ds  # filename only
-        with c2:
-            url_in = st.text_input("🌐 Website URL", placeholder="https://...", key="chat_url",
-                                   help="For website testing only")
-        with c3:
+            chosen_ds = st.selectbox("📂 Target Dataset (Optional)", ["Auto"] + all_ds, key="coord_ds")
+            target_ds_file = None if chosen_ds == "Auto" else chosen_ds
+        with c_btn:
             st.markdown("<br>", unsafe_allow_html=True)
-            submit_chat = st.button("Ask 🚀", type="primary", use_container_width=True, key="chat_go")
+            submit_coord = st.button("Ask Assistant 🚀", type="primary", use_container_width=True, key="coord_go")
 
-    if submit_chat:
-        if not query.strip():
-            st.warning("Please enter a question.")
-        else:
-            fmap = {"📊 Analytics":"analytics","📚 Knowledge Base":"knowledge","🌐 Website Testing":"website"}
-            forced = fmap.get(agent_choice)
-            with st.spinner("Thinking..."):
-                try:
-                    if forced == "analytics":
-                        from agents.analytics_agent import run_analytics_agent
-                        r = run_analytics_agent(username, query, file_path=fp)
-                        final = {"intent":"analytics","result":r,"error":r.get("error")}
-                    elif forced == "knowledge":
-                        from agents.knowledge_agent import run_knowledge_agent
-                        r = run_knowledge_agent(username, query)
-                        final = {"intent":"knowledge","result":r,"error":r.get("error")}
-                    elif forced == "website":
-                        from agents.website_testing_agent import run_website_testing_agent
-                        r = run_website_testing_agent(url_in or "")
-                        final = {"intent":"website","result":r,"error":r.get("error")}
-                    else:
-                        from agents.coordinator_agent import process_query
-                        final = process_query(username=username, query=query, file_path=fp, url=url_in or None)
-                except Exception as e:
-                    msg = str(e)
-                    if "429" in msg or "rate" in msg.lower():
-                        st.warning("⏳ LLM rate-limited. Showing computed results instead.")
-                    else:
-                        st.error(f"Error: {msg}")
-                    final = None
+    if submit_coord and coord_query.strip():
+        with st.spinner("Coordinator routing to specialist agent..."):
+            from agents.coordinator_agent import process_query
+            res = process_query(username=username, query=coord_query.strip(), file_path=target_ds_file)
+            st.session_state.last_coord_result = res
 
-            if final is None:
-                st.stop()
+    # Render Results
+    if "last_coord_result" in st.session_state:
+        res_data = st.session_state.last_coord_result
+        intent = res_data.get("intent", "coordinator")
+        result = res_data.get("result", {})
 
-            intent = final.get("intent","unknown")
-            result = final.get("result",{})
-            bmap = {"analytics":("b-ana","📊 Analytics Agent"),
-                    "knowledge":("b-know","📚 Knowledge Agent"),
-                    "website":("b-web","🌐 Website Testing Agent")}
-            bcls, blabel = bmap.get(intent,("b-know","🤖 Agent"))
-            st.markdown(f'<span class="badge {bcls}">{blabel}</span>', unsafe_allow_html=True)
+        bmap = {
+            "analytics": ("b-ana", "📊 Analytics Agent"),
+            "knowledge": ("b-know", "📚 Knowledge Agent"),
+            "website": ("b-web", "🌐 Website Testing Agent")
+        }
+        bcls, blabel = bmap.get(intent, ("b-know", "🤖 Agent"))
+        st.markdown(f'<span class="badge {bcls}">{blabel}</span>', unsafe_allow_html=True)
 
-            if intent == "analytics":
-                with st.container(border=True):
-                    st.markdown(result.get("answer","No answer."))
-                stats = result.get("stats",{})
-                if stats and any(k in stats for k in ("pass_count","avg_attendance","avg_cgpa")):
-                    cols = st.columns(4)
-                    kvs = [("Total", stats.get("total_students","—")),
-                           ("Pass %", f"{stats.get('pass_percentage','—')}%"),
-                           ("Attendance", f"{stats.get('avg_attendance','—')}%"),
-                           ("CGPA", stats.get("avg_cgpa","—"))]
-                    for c,(l,v) in zip(cols,kvs): c.metric(l,v)
-                if result.get("file_used"):
-                    st.caption(f"📂 Source: `{result['file_used']}`")
+        with st.expander("🛠️ Live Agent Execution Logs", expanded=False):
+            st.code(f"Routed Query: {res_data.get('query')}\nIntent Category: {intent}\nTarget Asset: {res_data.get('file_path') or res_data.get('url') or 'N/A'}\nStatus: SUCCESS", language="yaml")
 
-            elif intent == "knowledge":
-                with st.container(border=True):
-                    st.markdown(result.get("answer","No answer."))
-                if result.get("sources"):
-                    st.caption("📎 Sources: " + ", ".join(result["sources"]))
+        if intent == "analytics":
+            with st.container(border=True):
+                st.markdown(result.get("answer", "No response generated."))
+            charts = result.get("charts", [])
+            if charts:
+                st.markdown("#### 📊 Recommended Visualizations")
+                c1, c2 = st.columns(2)
+                for i, c in enumerate(charts[:4]):
+                    with (c1 if i % 2 == 0 else c2):
+                        st.plotly_chart(c["fig"], use_container_width=True)
 
-            elif intent == "website":
-                st.markdown(result.get("ai_report","No report."))
-                s = result.get("summary",{})
-                if s:
-                    c1,c2,c3 = st.columns(3)
-                    c1.metric("Pages",s.get("total_pages",0))
-                    c2.metric("🔴 Broken",s.get("broken_count",0))
-                    c3.metric("🟡 Slow",s.get("slow_count",0))
+        elif intent == "knowledge":
+            with st.container(border=True):
+                st.markdown(result.get("answer", "No response generated."))
+            if result.get("citations"):
+                st.caption("📎 Relevant Citations: " + " | ".join(result["citations"]))
+            if result.get("confidence_score"):
+                st.caption(f"🎯 Confidence Score: **{result['confidence_score']}%**")
 
-# ════════════════════════════════════════════════════════════════
-# ANALYTICS DASHBOARD
-# ════════════════════════════════════════════════════════════════
+        elif intent == "website":
+            scores = result.get("scores", {})
+            if scores:
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Overall Health", f"{scores.get('overall',0)}/100")
+                c2.metric("Performance", f"{scores.get('performance',0)}/100")
+                c3.metric("SEO", f"{scores.get('seo',0)}/100")
+                c4.metric("Accessibility", f"{scores.get('accessibility',0)}/100")
+                c5.metric("Security", f"{scores.get('security',0)}/100")
+            with st.container(border=True):
+                st.markdown(result.get("ai_report", "No report generated."))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PAGE 2: DEDICATED ANALYTICS AGENT
+# ═════════════════════════════════════════════════════════════════════════════
 elif st.session_state.nav_page == "analytics":
-    st.markdown('<div class="section-title">📊 Analytics Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:1.4rem; font-weight:800; margin-bottom:12px;">📊 Academic Data Analytics Agent</div>', unsafe_allow_html=True)
 
     all_ds = get_datasets(username)
     if not all_ds:
-        st.info("📂 No datasets found. Upload a CSV or Excel file from the sidebar.")
+        st.warning("📂 No datasets found. Upload an Excel or CSV file from the sidebar.")
     else:
-        chosen_name = st.selectbox("📂 Select Dataset", all_ds, key="ana_ds")
+        sel_ds = st.selectbox("📂 Select Academic Dataset to Analyze", all_ds, key="ana_page_ds")
 
-        try:
-            df = load_df(username, chosen_name)
-        except Exception as e:
-            st.error(f"Could not load file: {e}")
-            st.stop()
+        with st.spinner("Analyzing dataset dimensions & stats..."):
+            from agents.analytics_agent import ask_analytics_agent, generate_excel_summary, generate_pdf_report
+            res = ask_analytics_agent(username, query="Full dataset statistical summary and NAAC insights", filename=sel_ds)
 
-        # Normalise column names for detection
-        df_n = df.copy()
-        df_n.columns = [str(c).strip().lower().replace(" ", "_") for c in df_n.columns]
+        df = res.get("dataframe")
+        stats = res.get("stats", {})
+        charts = res.get("charts", [])
 
-        # Dataset info row
-        col_i1, col_i2, col_i3 = st.columns(3)
-        col_i1.metric("Total Rows", df.shape[0])
-        col_i2.metric("Columns", df.shape[1])
-        col_i3.metric("File", chosen_name)
+        # Metadata Header
+        if df is not None:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total Records", len(df))
+            m2.metric("Total Columns", len(df.columns))
+            m3.metric("Numeric Columns", len(stats.get("col_types", {}).get("numerical", [])))
+            m4.metric("Categorical Columns", len(stats.get("col_types", {}).get("categorical", [])))
 
-        with st.expander("📋 Preview Data (first 20 rows)", expanded=False):
-            st.dataframe(df.head(20), use_container_width=True)
+            with st.expander("📋 Data Table Preview (First 20 Rows)", expanded=False):
+                st.dataframe(df.head(20), use_container_width=True)
 
-        stats = compute_stats(df)
+        st.divider()
+        st.markdown("### 📊 Automated Multi-Chart Visualizations")
 
-        # ── Key Metrics ──────────────────────────────────────────
-        if stats:
-            st.markdown("### 📌 Key Metrics")
-            kpis = []
-            if "total_students" in stats:       kpis.append(("👥 Total Students",   stats["total_students"]))
-            if "pass_percentage" in stats:      kpis.append(("✅ Pass Rate",         f"{stats['pass_percentage']}%"))
-            if "fail_percentage" in stats:      kpis.append(("❌ Fail Rate",         f"{stats['fail_percentage']}%"))
-            if "avg_attendance" in stats:       kpis.append(("📅 Avg Attendance",    f"{stats['avg_attendance']}%"))
-            if "below_75_count" in stats:       kpis.append(("⚠️ Below 75% Att.",   stats["below_75_count"]))
-            if "avg_cgpa" in stats:             kpis.append(("🎓 Avg CGPA",          stats["avg_cgpa"]))
-            if "placement_eligible" in stats:   kpis.append(("💼 Placement Eligible",stats["placement_eligible"]))
-            if "placed_count" in stats:         kpis.append(("🏢 Placed",            stats["placed_count"]))
-            if "placement_rate_pct" in stats:   kpis.append(("📈 Placement Rate",    f"{stats['placement_rate_pct']}%"))
-
-            if kpis:
-                for i in range(0, len(kpis), 4):
-                    chunk = kpis[i:i+4]
-                    for col, (lbl, val) in zip(st.columns(len(chunk)), chunk):
-                        col.metric(lbl, val)
-            st.divider()
-
-            # ── Charts ───────────────────────────────────────────
-            # 1. Pass / Fail
-            if "pass_count" in stats and stats["pass_count"] + stats["fail_count"] > 0:
-                ch1, ch2 = st.columns(2)
-                with ch1:
-                    fig_pf = go.Figure(go.Pie(
-                        labels=["Pass", "Fail"],
-                        values=[stats["pass_count"], stats["fail_count"]],
-                        marker_colors=["#2ecc71", "#e74c3c"],
-                        hole=0.45,
-                        textinfo="label+percent+value",
-                    ))
-                    fig_pf.update_layout(
-                        title=dict(text="✅ Pass vs Fail — Donut", font=dict(size=15)),
-                        height=340, paper_bgcolor="rgba(0,0,0,0)", showlegend=True,
-                    )
-                    st.plotly_chart(fig_pf, use_container_width=True)
-                with ch2:
-                    fig_pf_bar = px.bar(
-                        x=["Pass", "Fail"],
-                        y=[stats["pass_count"], stats["fail_count"]],
-                        color=["Pass", "Fail"],
-                        color_discrete_map={"Pass": "#2ecc71", "Fail": "#e74c3c"},
-                        labels={"x": "Result", "y": "Number of Students"},
-                        text_auto=True,
-                    )
-                    fig_pf_bar.update_layout(
-                        title=dict(text="✅ Pass vs Fail — Count", font=dict(size=15)),
-                        height=340, paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)", showlegend=False,
-                    )
-                    st.plotly_chart(fig_pf_bar, use_container_width=True)
-
-            # 2. Attendance
-            att_col = next((c for c in ("attendance", "attendance_percentage", "att_%", "attendance_%") if c in df_n.columns), None)
-            if att_col:
-                ch3, ch4 = st.columns(2)
-                with ch3:
-                    fig_att = px.violin(
-                        df_n, y=att_col, box=True, points="all",
-                        color_discrete_sequence=["#3498db"],
-                        labels={att_col: "Attendance (%)"},
-                    )
-                    fig_att.add_hline(y=75, line_dash="dash", line_color="#e74c3c",
-                                      annotation_text="75% Min")
-                    fig_att.update_layout(
-                        title=dict(text="📅 Attendance Distribution", font=dict(size=15)),
-                        height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
-                    )
-                    st.plotly_chart(fig_att, use_container_width=True)
-                with ch4:
-                    att_cats = {
-                        "Critical (<60%)":  int((df_n[att_col] < 60).sum()),
-                        "Risk (60–75%)":    int(((df_n[att_col] >= 60) & (df_n[att_col] < 75)).sum()),
-                        "Good (75–90%)":    int(((df_n[att_col] >= 75) & (df_n[att_col] < 90)).sum()),
-                        "Excellent (90%+)": int((df_n[att_col] >= 90).sum()),
-                    }
-                    fig_att_pie = px.pie(
-                        names=list(att_cats.keys()),
-                        values=list(att_cats.values()),
-                        color_discrete_sequence=["#e74c3c", "#f39c12", "#3498db", "#2ecc71"],
-                    )
-                    fig_att_pie.update_layout(
-                        title=dict(text="📅 Attendance Bands", font=dict(size=15)),
-                        height=320, paper_bgcolor="rgba(0,0,0,0)"
-                    )
-                    st.plotly_chart(fig_att_pie, use_container_width=True)
-
-            # 3. Subject-wise averages
-            if "subject_averages" in stats:
-                sa = stats["subject_averages"]
-                subj_labels = [k.replace("_", " ").title() for k in sa.keys()]
-                subj_values = list(sa.values())
-                colors_subj = ["#2ecc71" if v >= 60 else "#f39c12" if v >= 40 else "#e74c3c" for v in subj_values]
-                ch_s1, ch_s2 = st.columns(2)
-                with ch_s1:
-                    fig_subj = px.bar(
-                        x=subj_labels, y=subj_values,
-                        labels={"x": "Subject", "y": "Average Marks"},
-                        text_auto=True,
-                    )
-                    fig_subj.update_traces(marker_color=colors_subj)
-                    fig_subj.add_hline(y=40, line_dash="dash", line_color="#e74c3c", annotation_text="Pass (40)")
-                    fig_subj.add_hline(y=60, line_dash="dot", line_color="#2ecc71", annotation_text="Good (60)")
-                    fig_subj.update_layout(
-                        title=dict(text="📚 Subject-wise Averages (Bar)", font=dict(size=15)),
-                        height=350, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        xaxis_tickangle=-30,
-                    )
-                    st.plotly_chart(fig_subj, use_container_width=True)
-                with ch_s2:
-                    fig_radar = go.Figure(data=go.Scatterpolar(
-                        r=subj_values + [subj_values[0]] if subj_values else [],
-                        theta=subj_labels + [subj_labels[0]] if subj_labels else [],
-                        fill='toself',
-                        marker_color='#9b59b6'
-                    ))
-                    fig_radar.update_layout(
-                        title=dict(text="🕸️ Subject Performance Radar", font=dict(size=15)),
-                        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                        height=350, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
-                    )
-                    st.plotly_chart(fig_radar, use_container_width=True)
-
-            # 4. CGPA
-            cgpa_col = next((c for c in ("cgpa", "gpa", "aggregate") if c in df_n.columns), None)
-            if cgpa_col:
-                ch5, ch6 = st.columns(2)
-                with ch5:
-                    fig_cgpa = px.histogram(
-                        df_n, x=cgpa_col, nbins=20,
-                        color_discrete_sequence=["#9b59b6"],
-                        labels={cgpa_col: "CGPA"},
-                    )
-                    fig_cgpa.add_vline(x=6.0, line_dash="dash", line_color="#e67e22",
-                                       annotation_text="Placement Min (6.0)")
-                    fig_cgpa.update_layout(
-                        title=dict(text="🎓 CGPA Distribution", font=dict(size=15)),
-                        height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
-                    )
-                    st.plotly_chart(fig_cgpa, use_container_width=True)
-                with ch6:
-                    buckets = {
-                        "Below 5.0":  int((df_n[cgpa_col] < 5).sum()),
-                        "5.0 – 6.0":  int(((df_n[cgpa_col] >= 5) & (df_n[cgpa_col] < 6)).sum()),
-                        "6.0 – 7.5":  int(((df_n[cgpa_col] >= 6) & (df_n[cgpa_col] < 7.5)).sum()),
-                        "7.5 – 9.0":  int(((df_n[cgpa_col] >= 7.5) & (df_n[cgpa_col] < 9)).sum()),
-                        "9.0 and above": int((df_n[cgpa_col] >= 9).sum()),
-                    }
-                    fig_cgpa_pie = px.pie(
-                        names=list(buckets.keys()),
-                        values=list(buckets.values()),
-                        color_discrete_sequence=px.colors.sequential.Purples_r,
-                    )
-                    fig_cgpa_pie.update_layout(
-                        title=dict(text="🎓 CGPA Brackets", font=dict(size=15)),
-                        height=320, paper_bgcolor="rgba(0,0,0,0)"
-                    )
-                    st.plotly_chart(fig_cgpa_pie, use_container_width=True)
-
-            # 5. Placement
-            if "placed" in df_n.columns or "placement_status" in df_n.columns:
-                placed_col = "placed" if "placed" in df_n.columns else "placement_status"
-                pc_df = df_n[placed_col].astype(str).str.strip().str.upper().value_counts().reset_index()
-                pc_df.columns = ["Status", "Count"]
-                ch7, ch8 = st.columns(2)
-                with ch7:
-                    fig_place = px.pie(
-                        pc_df, names="Status", values="Count",
-                        color_discrete_sequence=["#2ecc71", "#e74c3c", "#3498db"],
-                    )
-                    fig_place.update_layout(
-                        title=dict(text="💼 Placement Status", font=dict(size=15)),
-                        height=300, paper_bgcolor="rgba(0,0,0,0)"
-                    )
-                    st.plotly_chart(fig_place, use_container_width=True)
-                with ch8:
-                    fig_place_bar = px.bar(
-                        pc_df, x="Status", y="Count",
-                        color="Status",
-                        color_discrete_sequence=["#2ecc71", "#e74c3c", "#3498db"],
-                        text_auto=True,
-                    )
-                    fig_place_bar.update_layout(
-                        title=dict(text="💼 Placement Count", font=dict(size=15)),
-                        height=300, paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)", showlegend=False
-                    )
-                    st.plotly_chart(fig_place_bar, use_container_width=True)
-
-        # ── Generic / non-academic data
+        if charts:
+            for i in range(0, len(charts), 2):
+                row_cols = st.columns(2)
+                for j, ch in enumerate(charts[i:i+2]):
+                    with row_cols[j]:
+                        st.plotly_chart(ch["fig"], use_container_width=True)
         else:
-            st.info("ℹ️ No standard academic columns detected. Showing generic analysis.")
-            num_df = df_n.select_dtypes(include="number")
-            if not num_df.empty:
-                st.markdown("### 📋 Statistical Summary")
-                st.dataframe(num_df.describe().round(2), use_container_width=True)
-                st.markdown("### 📊 Column Distributions")
-                id_keywords = {"id", "no", "num", "reg", "roll", "serial", "sr"}
-                valid_cols = [c for c in num_df.columns if not any(k in c.lower() for k in id_keywords)]
-                cols_to_plot = valid_cols[:6] if valid_cols else num_df.columns[:6]
-                for i in range(0, len(cols_to_plot), 2):
-                    row_cols = st.columns(2)
-                    for j, col_name in enumerate(cols_to_plot[i:i+2]):
-                        with row_cols[j]:
-                            fig_gen = px.histogram(
-                                df_n, x=col_name, nbins=30,
-                                title=f"Distribution — {col_name.replace('_',' ').title()}",
-                                color_discrete_sequence=["#3498db"],
-                            )
-                            fig_gen.update_layout(height=280, paper_bgcolor="rgba(0,0,0,0)",
-                                                  plot_bgcolor="rgba(0,0,0,0)")
-                            st.plotly_chart(fig_gen, use_container_width=True)
-            else:
-                st.dataframe(df.head(50), use_container_width=True)
+            st.info("No numeric columns available for visualization.")
 
-        # Correlation Heatmap
-        num_df = df.select_dtypes(include="number")
-        if not num_df.empty and num_df.shape[1] > 1:
-            st.markdown("### 🔗 Correlation Analysis")
-            fig_corr = px.imshow(
-                num_df.corr().round(2), text_auto=True, 
-                color_continuous_scale="RdBu_r", zmin=-1, zmax=1
-            )
-            fig_corr.update_layout(
-                height=450, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
-            )
-            st.plotly_chart(fig_corr, use_container_width=True)
+        st.divider()
+        st.markdown("### 💬 Ask Gemini Natural Language Questions")
+        nl_q = st.text_input("Ask a question about this dataset (e.g. 'Compare placements', 'Highest CGPA', 'Show research trend'):", key="ana_nl_q")
+        if st.button("Analyze with Gemini ⚡", type="primary", key="go_ana_nl") and nl_q.strip():
+            with st.spinner("Gemini 2.5 Flash analyzing dataset..."):
+                nl_res = ask_analytics_agent(username, query=nl_q.strip(), filename=sel_ds)
+            with st.container(border=True):
+                st.markdown(nl_res.get("answer", ""))
 
-        # Full stats expander
-        if not num_df.empty:
-            with st.expander("📋 Full Statistical Summary Table"):
-                st.dataframe(num_df.describe().round(2), use_container_width=True)
+        st.divider()
+        st.markdown("### 📥 Download Reports & Summaries")
+        d_col1, d_col2 = st.columns(2)
+        with d_col1:
+            if df is not None:
+                excel_bytes = generate_excel_summary(df, stats)
+                st.download_button("📥 Download Excel Summary", data=excel_bytes, file_name=f"{sel_ds}_summary.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        with d_col2:
+            if df is not None:
+                pdf_bytes = generate_pdf_report(username, sel_ds, res.get("answer", ""), stats)
+                st.download_button("📥 Download NAAC PDF Report", data=pdf_bytes, file_name=f"{sel_ds}_NAAC_report.pdf",
+                                   mime="application/pdf", use_container_width=True)
 
-# ════════════════════════════════════════════════════════════════
-# KNOWLEDGE BASE
-# ════════════════════════════════════════════════════════════════
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PAGE 3: DEDICATED KNOWLEDGE AGENT
+# ═════════════════════════════════════════════════════════════════════════════
 elif st.session_state.nav_page == "knowledge":
-    st.markdown('<div class="section-title">📚 Knowledge Base</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:1.4rem; font-weight:800; margin-bottom:12px;">📚 Knowledge Base RAG Agent</div>', unsafe_allow_html=True)
 
     docs = get_doc_list(username)
     chunks = get_chunk_count(username)
 
     if not docs:
-        st.warning("No documents uploaded yet. Upload PDF or TXT files from the sidebar.")
+        st.warning("No documents uploaded yet. Upload PDF, DOCX, TXT, or MD files from the sidebar.")
     else:
-        st.success(f"**{len(docs)} document(s) available:** {', '.join(docs)}")
-        if not chunks:
-            st.warning("⚠️ Documents not indexed yet. Click 'Re-index Knowledge Base' in the sidebar.")
-        else:
-            st.info(f"✅ Knowledge base ready — {chunks} chunks indexed from {len(docs)} document(s)")
+        st.success(f"**Available Documents ({len(docs)}):** {', '.join(docs)} | **Indexed Chunks:** {chunks}")
 
-    st.markdown("#### 🔍 Ask a Question")
-    kb_query = st.text_input("Question about your documents", key="kb_q",
-                              placeholder="e.g. What is the minimum attendance required?  |  What is the fee structure?")
+    st.markdown("### 🔍 RAG Document Question Answering")
+    kb_q = st.text_input("Enter question about departmental policies, regulations, or handbooks:", placeholder="e.g. What is the minimum attendance percentage to appear for end semester exams?", key="kb_page_q")
 
-    if st.button("Search 🔍", type="primary", key="kb_go"):
-        if not kb_query.strip():
-            st.warning("Please enter a question.")
-        elif not chunks:
-            st.error("Knowledge base is empty. Upload documents and click Re-index first.")
-        else:
-            with st.spinner("Searching knowledge base..."):
-                from agents.knowledge_agent import run_knowledge_agent
-                r = run_knowledge_agent(username, kb_query)
+    if st.button("Search & Answer 🔍", type="primary", key="go_kb_q") and kb_q.strip():
+        with st.spinner("Searching document vector store with Gemini 2.5 Flash RAG..."):
+            from agents.knowledge_agent import ask_knowledge_agent
+            kb_res = ask_knowledge_agent(username, kb_q.strip())
 
-            st.markdown('<span class="badge b-know">📚 Knowledge Agent</span>', unsafe_allow_html=True)
-            with st.container(border=True):
-                st.markdown(r.get("answer","No answer found."))
-            if r.get("sources"):
-                st.caption("📎 Sources: " + ", ".join(r["sources"]))
+        with st.container(border=True):
+            st.markdown(kb_res.get("answer", ""))
+
+        c_meta1, c_meta2 = st.columns(2)
+        with c_meta1:
+            if kb_res.get("sources"):
+                st.info(f"📎 **Sources Used:** {', '.join(kb_res['sources'])}")
+        with c_meta2:
+            if kb_res.get("confidence_score"):
+                st.success(f"🎯 **RAG Confidence Score:** {kb_res['confidence_score']}%")
 
     st.divider()
-    st.markdown("#### 💡 What can you ask?")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("""
-- *What is the minimum attendance to sit for exams?*
-- *What is the pass mark for end-semester exams?*
-- *What is the grading system?*
-- *What are the placement eligibility criteria?*
-        """)
-    with c2:
-        st.markdown("""
-- *What is the fee structure?*
-- *How many credits are required to graduate?*
-- *What is the revaluation procedure?*
-- *What happens if a student has arrears?*
-        """)
+    st.markdown("### 🎓 NAAC Preparation Tools")
 
-# ════════════════════════════════════════════════════════════════
-# WEBSITE TESTER
-# ════════════════════════════════════════════════════════════════
-elif st.session_state.nav_page == "website":
-    st.markdown('<div class="section-title">🌐 Website & Portal Tester</div>', unsafe_allow_html=True)
-    st.markdown("Automatically checks your department website for broken links, slow pages, and JS errors.")
+    t1, t2 = st.tabs(["📜 NAAC Criterion Summarizer", "📑 Compare Two Documents"])
+    with t1:
+        c_num = st.selectbox("Select NAAC Criterion", list(range(1, 8)), format_func=lambda x: f"Criterion {x}")
+        if st.button("Generate Criterion Summary 📝", key="go_crit_sum"):
+            with st.spinner(f"Generating summary for Criterion {c_num}..."):
+                from agents.knowledge_agent import generate_criterion_summary
+                crit_text = generate_criterion_summary(username, c_num)
+            with st.container(border=True):
+                st.markdown(crit_text)
 
-    web_url = st.text_input("Website URL", placeholder="https://cs.university.edu", key="web_url")
+    with t2:
+        if len(docs) >= 2:
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                d1 = st.selectbox("Select Document 1", docs, key="cmp_d1")
+            with col_d2:
+                d2 = st.selectbox("Select Document 2", [d for d in docs if d != d1], key="cmp_d2")
 
-    if st.button("Run Tests 🔍", type="primary", key="run_web"):
-        if not web_url.strip():
-            st.warning("Please enter a URL.")
+            if st.button("Compare & Find Differences ⚖️", key="go_doc_cmp"):
+                with st.spinner(f"Comparing `{d1}` vs `{d2}`..."):
+                    from agents.knowledge_agent import compare_documents
+                    cmp_res = compare_documents(username, d1, d2)
+                with st.container(border=True):
+                    st.markdown(cmp_res)
         else:
-            with st.spinner(f"Testing {web_url}... (may take 30–60 seconds)"):
-                from agents.website_testing_agent import run_website_testing_agent
-                res = run_website_testing_agent(web_url.strip())
+            st.info("Upload at least 2 documents to use the document comparison tool.")
 
-            if res.get("error") and not res.get("summary"):
-                st.error(f"Could not test: {res['error']}")
-            else:
-                s = res["summary"]
-                st.markdown("#### 📊 Test Summary")
-                c1,c2,c3,c4 = st.columns(4)
-                c1.metric("Pages Checked", s.get("total_pages",0))
-                c2.metric("🔴 Broken", s.get("broken_count",0))
-                c3.metric("🟡 Slow (>3s)", s.get("slow_count",0))
-                c4.metric("⚠️ JS Errors", len(s.get("pages_with_console_errors",[])))
 
-                overall = "🟢 Healthy" if s.get("broken_count",0)==0 and s.get("slow_count",0)==0 else "🔴 Issues Found"
-                st.markdown(f"**Overall Status:** {overall}")
+# ═════════════════════════════════════════════════════════════════════════════
+# PAGE 4: DEDICATED WEBSITE TESTING AGENT
+# ═════════════════════════════════════════════════════════════════════════════
+elif st.session_state.nav_page == "website":
+    st.markdown('<div style="font-size:1.4rem; font-weight:800; margin-bottom:12px;">🌐 Website Testing & NAAC Audit Agent</div>', unsafe_allow_html=True)
+    st.markdown("Automated 8-Tier Website Inspection (Basic, Links, SEO, Accessibility, Performance, Security, Content, Structure).")
 
-                st.divider()
-                st.markdown("#### 📋 Report")
-                st.markdown(res.get("ai_report",""))
+    with st.container(border=True):
+        w_url = st.text_input("Department Website URL", placeholder="https://cs.university.edu", key="web_page_url")
+        btn_run_web = st.button("Run Full Automated Audit 🚀", type="primary", key="go_web_audit")
 
-                if s.get("all_pages"):
-                    st.divider()
-                    st.markdown("#### 🗂 Page-by-Page Results")
-                    rows = [{"URL": p["url"],
-                             "HTTP Status": p.get("status","—"),
-                             "Load Time (ms)": p.get("load_time_ms","—"),
-                             "Title": (p.get("title") or "")[:50],
-                             "H1": "✅" if p.get("has_h1") else "❌",
-                             "Result": "🔴 Broken" if p.get("broken") else "🟢 OK"}
-                            for p in s["all_pages"]]
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=300)
+    if btn_run_web and w_url.strip():
+        with st.spinner(f"Crawling & auditing {w_url}..."):
+            prog = st.progress(0, text="Initializing crawler...")
+            for val in range(25, 100, 25):
+                prog.progress(val, text=f"Inspecting pages and security headers... ({val}%)")
+            from agents.website_testing_agent import run_website_testing_agent, generate_website_pdf_report
+            web_res = run_website_testing_agent(w_url.strip(), username=username)
+            prog.progress(100, text="Audit Complete!")
+            st.session_state.web_page_result = web_res
 
-# ════════════════════════════════════════════════════════════════
-# ABOUT
-# ════════════════════════════════════════════════════════════════
-elif st.session_state.nav_page == "about":
-    st.markdown('<div class="section-title">ℹ️ About DeptOps AI</div>', unsafe_allow_html=True)
-    c1,c2 = st.columns(2)
-    with c1:
-        st.markdown("""
-### What is DeptOps AI?
-DeptOps AI is an **agentic AI platform** built for Heads of Departments (HODs) to manage academic operations efficiently from one place.
+    if "web_page_result" in st.session_state:
+        w_res = st.session_state.web_page_result
+        summary = w_res.get("summary", {})
+        scores = w_res.get("scores", {})
 
-### Architecture
-```
-Your Query
-    │
-    ▼
-Coordinator Agent
-    ├── 📊 Analytics Agent
-    │     Pandas + LLM
-    ├── 📚 Knowledge Agent
-    │     TF-IDF RAG + LLM
-    └── 🌐 Website Agent
-          Playwright + Report
-```
-        """)
-    with c2:
-        st.markdown("""
-### Agents
-| Agent | Technology | Purpose |
-|-------|-----------|---------|
-| 📊 Analytics | Pandas + Plotly | Data analysis |
-| 📚 Knowledge | TF-IDF RAG | Policy Q&A |
-| 🌐 Website | Playwright | Web testing |
-| 🧠 Coordinator | Keyword routing | Auto-routing |
+        st.markdown("### 🏆 Health Scores Dashboard")
+        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+        sc1.markdown(f'<div class="score-card"><div class="score-val">{scores.get("overall",0)}</div><div class="score-lbl">Overall Health</div></div>', unsafe_allow_html=True)
+        sc2.markdown(f'<div class="score-card"><div class="score-val">{scores.get("performance",0)}</div><div class="score-lbl">Performance</div></div>', unsafe_allow_html=True)
+        sc3.markdown(f'<div class="score-card"><div class="score-val">{scores.get("seo",0)}</div><div class="score-lbl">SEO Score</div></div>', unsafe_allow_html=True)
+        sc4.markdown(f'<div class="score-card"><div class="score-val">{scores.get("accessibility",0)}</div><div class="score-lbl">Accessibility</div></div>', unsafe_allow_html=True)
+        sc5.markdown(f'<div class="score-card"><div class="score-val">{scores.get("security",0)}</div><div class="score-lbl">Security</div></div>', unsafe_allow_html=True)
 
-### Tech Stack
-- **Python 3.11+**
-- **LangChain + LangGraph**
-- **OpenRouter** (LLM API)
-- **Playwright** (web testing)
-- **Streamlit** (UI)
-- **TF-IDF** (document search)
+        st.divider()
+        st.markdown("### 🤖 Gemini 2.5 Flash NAAC Recommendations & Fixes")
+        with st.container(border=True):
+            st.markdown(w_res.get("ai_report", ""))
 
-</div>
+        if w_res.get("all_pages"):
+            st.divider()
+            st.markdown("### 🗂 Page-by-Page Audit Table")
+            rows = [
+                {
+                    "URL": p["url"],
+                    "Status": p.get("status", "—"),
+                    "Load Time (ms)": p.get("load_time_ms", "—"),
+                    "Title": (p.get("title") or "Missing Title")[:40],
+                    "H1 Heading": "✅ Present" if p.get("has_h1") else "❌ Missing",
+                    "Missing ALT Tags": p.get("missing_alt_count", 0),
+                    "SSL/HTTPS": "🔒 Yes" if p.get("is_https") else "⚠️ No",
+                    "Result": "🔴 Broken" if p.get("broken") else "🟢 OK"
+                }
+                for p in w_res["all_pages"]
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, height=280)
 
-### PDF Upload — How it works
-When you upload a PDF:
-1. It's saved to `data/documents/`
-2. Click **Re-index Knowledge Base**
-3. The PDF is parsed and split into chunks
-4. Each chunk is indexed using TF-IDF
-5. When you ask a question, relevant chunks are retrieved and answered
-        """)
+        st.divider()
+        pdf_bytes = generate_website_pdf_report(w_url.strip(), summary, w_res.get("ai_report", ""))
+        st.download_button("📥 Download PDF Web Audit Report", data=pdf_bytes, file_name=f"Website_Audit_Report.pdf", mime="application/pdf", use_container_width=True)

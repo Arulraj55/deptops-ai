@@ -1,91 +1,72 @@
 """
-Coordinator Agent
------------------
-Routes HOD queries to the correct specialist agent using keyword matching.
-No LangGraph / LLM used for routing — pure keyword scoring.
-This makes routing instant, offline, and 100% rate-limit proof.
-
-Routing priority (keyword score):
-  highest score → Analytics Agent
-  highest score → Knowledge Agent
-  highest score → Website Testing Agent
-  tie           → Analytics (most common use case)
+Coordinator Agent for DeptOps AI
+--------------------------------
+Central Intelligence Engine.
+Automatically detects user intent from file uploads, website URLs, or natural language prompts,
+and routes to the appropriate specialist agent (Analytics, Knowledge, or Website Testing).
 """
 
-from __future__ import annotations
 import re
+import logging
+from config import get_llm, invoke_llm_with_retry
+
+logger = logging.getLogger("CoordinatorAgent")
+
+# File extension mappings
+ANALYTICS_EXTS = {".csv", ".xlsx", ".xls"}
+KNOWLEDGE_EXTS = {".pdf", ".docx", ".doc", ".txt", ".md"}
 
 
-# ── Keyword patterns ──────────────────────────────────────────────────────────
-
-_ANA = re.compile(
-    r"\b(pass|fail|result|attendance|marks|grade|cgpa|gpa|placement|score|"
-    r"performance|subject|exam|student|rank|percentage|dataset|csv|excel|"
-    r"analytics|statistics|analysis|faculty|average|topper|highest|lowest|"
-    r"dropout|semester|division|distinction|aggregate)\b",
-    re.IGNORECASE,
-)
-
-_KNOW = re.compile(
-    r"\b(regulation|policy|syllabus|rule|guideline|handbook|document|"
-    r"eligibility|criteria|procedure|fee|leave|exam.pattern|curriculum|"
-    r"credit|course|circular|notice|ordinance|academic|minimum|required|"
-    r"allowed|permit|shortage|backlog|arrear|revaluation|supplementary)\b",
-    re.IGNORECASE,
-)
-
-_WEB = re.compile(
-    r"\b(website|portal|url|link|http|https|broken|down|slow|web|site|"
-    r"navigate|load|test|check|verify|page|access|online|server)\b",
-    re.IGNORECASE,
-)
-
-
-def classify_intent(query: str) -> str:
-    """Classify query into analytics / knowledge / website using LLM with fallback to keyword scoring."""
-    # Website check: if URL present, always website
-    if re.search(r"https?://\S+", query):
-        return "website"
-
-    # Try LLM classification for accurate intent routing
-    try:
-        from config import get_llm
-        from langchain_core.prompts import ChatPromptTemplate
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "Classify the query into one of three categories:\n"
-                       "- 'analytics' (asking for stats, percentages, numbers, grades, attendance from a dataset)\n"
-                       "- 'knowledge' (asking for rules, regulations, syllabus, policies, procedures)\n"
-                       "- 'website' (asking to check a link or website)\n"
-                       "Return ONLY the category name in lowercase without any other text."),
-            ("human", "{query}")
-        ])
-        llm = get_llm(temperature=0.0)
-        resp = (prompt | llm).invoke({"query": query})
-        if resp and resp.content:
-            intent = resp.content.strip().lower()
-            if intent in ["analytics", "knowledge", "website"]:
-                return intent
-    except Exception:
-        pass
-
-    # Fallback to keyword scoring
-    a = len(_ANA.findall(query))
-    k = len(_KNOW.findall(query))
-    w = len(_WEB.findall(query))
-
-    if w > 0 and w >= a and w >= k:
-        return "website"
-    if k > a:
-        return "knowledge"
-    if a > 0:
+def detect_file_type_intent(filename: str) -> str | None:
+    """Detect agent intent based on uploaded file extension."""
+    if not filename:
+        return None
+    ext = filename.lower()[filename.rfind("."):].strip() if "." in filename else ""
+    if ext in ANALYTICS_EXTS:
         return "analytics"
-    if k > 0:
+    if ext in KNOWLEDGE_EXTS:
         return "knowledge"
-    # Default
+    return None
+
+
+def extract_url(text: str) -> str | None:
+    """Extract http/https URL from prompt if present."""
+    match = re.search(r"https?://[^\s]+", text)
+    return match.group(0) if match else None
+
+
+def classify_intent_with_gemini(query: str) -> str:
+    """Classify user query intent into 'analytics', 'knowledge', or 'website' using Gemini 2.5 Flash."""
+    if extract_url(query):
+        return "website"
+
+    try:
+        llm = get_llm(temperature=0.0)
+        prompt = (
+            f"You are the Coordinator Intelligence Router for DeptOps AI.\n"
+            f"Classify the following user input into EXACTLY ONE category:\n"
+            f"- 'analytics' (query asks about grades, marks, attendance, placements, CGPA, dataset statistics, charts, faculty, research counts)\n"
+            f"- 'knowledge' (query asks about policies, regulations, syllabus, handbooks, NAAC criteria, document summaries, guidelines)\n"
+            f"- 'website' (query asks to check, audit, test, or inspect a website or URL)\n\n"
+            f"User input: \"{query}\"\n\n"
+            f"Return ONLY the single word in lowercase without quotes or extra text."
+        )
+        res = invoke_llm_with_retry(llm, prompt)
+        intent = (res.content if hasattr(res, "content") else str(res)).strip().lower()
+        if intent in ("analytics", "knowledge", "website"):
+            return intent
+    except Exception as exc:
+        logger.warning(f"Gemini intent classification fallback: {exc}")
+
+    # Keyword fallback
+    q_lower = query.lower()
+    if any(k in q_lower for k in ("http", "www.", "website", "site", "url", "portal")):
+        return "website"
+    if any(k in q_lower for k in ("criterion", "policy", "regulation", "syllabus", "summarize", "document", "rule", "handbook")):
+        return "knowledge"
+
     return "analytics"
 
-
-# ── Main Entry Point ──────────────────────────────────────────────────────────
 
 def process_query(
     username: str,
@@ -94,17 +75,29 @@ def process_query(
     url: str | None = None,
 ) -> dict:
     """
-    Route the query to the right agent and return its result.
-    All exceptions are caught — never crashes the UI.
+    Central Coordinator routing handler.
+    Auto-detects intent from file, URL, or natural language query,
+    executes the appropriate agent, and updates unified chat history.
     """
-    intent = classify_intent(query)
+    intent = None
 
-    # Override: if URL provided explicitly, force website
-    if url and url.strip():
+    # 1. URL input -> Website Testing
+    target_url = url or extract_url(query)
+    if target_url:
         intent = "website"
 
-    result: dict = {}
-    error: str | None = None
+    # 2. File upload -> Analytics or Knowledge
+    elif file_path:
+        intent = detect_file_type_intent(file_path)
+
+    # 3. Prompt classification
+    if not intent:
+        intent = classify_intent_with_gemini(query)
+
+    logger.info(f"Coordinator routed query '{query[:40]}' -> intent '{intent}' for user '{username}'")
+
+    result = {}
+    error = None
 
     try:
         if intent == "analytics":
@@ -117,26 +110,28 @@ def process_query(
 
         elif intent == "website":
             from agents.website_testing_agent import run_website_testing_agent
-            target_url = url or _extract_url(query) or ""
-            result = run_website_testing_agent(url=target_url)
+            url_to_test = target_url or query.strip()
+            result = run_website_testing_agent(url=url_to_test, username=username)
 
-        error = result.get("error")
+        # Store in PostgreSQL chat history
+        try:
+            from db_storage import add_chat_message
+            add_chat_message(username=username, role="user", message=query, agent_used=intent)
+            answer_summary = result.get("answer") or result.get("ai_report") or "Query processed successfully."
+            add_chat_message(username=username, role="assistant", message=answer_summary[:500], agent_used=intent)
+        except Exception:
+            pass
 
     except Exception as exc:
+        logger.error(f"Error executing agent '{intent}': {exc}")
         error = str(exc)
-        result = {"answer": f"Agent error: {exc}", "stats": {}, "sources": [], "summary": {}, "ai_report": ""}
+        result = {"answer": f"Agent error: {exc}", "error": error}
 
     return {
         "query": query,
         "intent": intent,
         "file_path": file_path,
-        "url": url,
+        "url": target_url,
         "result": result,
         "error": error,
     }
-
-
-def _extract_url(query: str) -> str | None:
-    """Extract a URL from a query string if present."""
-    m = re.search(r"https?://\S+", query)
-    return m.group(0) if m else None

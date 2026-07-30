@@ -59,6 +59,49 @@ def _init_db():
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            # Analytics generated reports history
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_reports (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL,
+                    filename VARCHAR(255) NOT NULL,
+                    report_json TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            # Knowledge sessions
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_sessions (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL,
+                    session_id VARCHAR(100) NOT NULL,
+                    history_json TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            # Website scan history
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS website_scan_history (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL,
+                    url VARCHAR(500) NOT NULL,
+                    overall_score INT NOT NULL,
+                    scores_json TEXT NOT NULL,
+                    report_text TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            # Unified Chat history
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL,
+                    role VARCHAR(20) NOT NULL,
+                    message TEXT NOT NULL,
+                    agent_used VARCHAR(50) DEFAULT 'coordinator',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
         conn.commit()
 
     # Add username column to existing tables if they were created before this change

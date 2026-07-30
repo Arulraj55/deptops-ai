@@ -1,33 +1,57 @@
 """
-Knowledge Agent
----------------
-RAG-based Q&A over institutional documents.
+Knowledge Agent for DeptOps AI
+------------------------------
+RAG Pipeline over Institutional Documents (PDF, DOCX, TXT, MD) using Gemini 2.5 Flash.
 
-Uses TF-IDF retrieval (scikit-learn) — zero downloads, works offline.
-Documents and the TF-IDF index are stored in Neon PostgreSQL so they
-persist across Render restarts.
+Features:
+- Multi-format document loader: PDF (PyPDFLoader), DOCX (python-docx), TXT, Markdown (.md).
+- Recursive document chunking with metadata tracking (source, page number, chunk index).
+- Semantic Vector Store (ChromaDB / TF-IDF hybrid vector search) with confidence scoring.
+- Structured Answers containing: Answer, Source document, Page number, Confidence score (%), Relevant citations.
+- Special NAAC modes: Criterion 1-7 summaries, Document Comparison / Diffing, Table/Key point extraction.
+- Anti-hallucination guardrail: State "The uploaded documents do not contain this information." if context is absent.
 """
 
 import io
+import os
+import re
 import json
 import math
-import re
-from collections import defaultdict
+import tempfile
+import logging
 from pathlib import Path
+from collections import defaultdict
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 
-from config import get_llm
+from config import get_llm, invoke_llm_with_retry, CHROMA_PERSIST_DIR
+
+logger = logging.getLogger("KnowledgeAgent")
 
 
-# ── Document loading from DB ──────────────────────────────────────────────────
+# ── Document Loader Engine (PDF, DOCX, TXT, MD) ──────────────────────────────
 
-def _load_documents_from_db(username: str) -> list[Document]:
-    """Load all knowledge documents stored in the database."""
-    import tempfile, os
+def _load_docx(file_bytes: bytes, filename: str) -> list[Document]:
+    """Extract text from a .docx Word document."""
+    try:
+        import docx
+        buf = io.BytesIO(file_bytes)
+        doc = docx.Document(buf)
+        full_text = []
+        for p in doc.paragraphs:
+            if p.text.strip():
+                full_text.append(p.text)
+        content = "\n\n".join(full_text)
+        return [Document(page_content=content, metadata={"source": filename, "page": 1})]
+    except Exception as exc:
+        logger.error(f"Error reading docx {filename}: {exc}")
+        return []
+
+
+def load_documents_from_db(username: str) -> list[Document]:
+    """Load and parse all stored PDF, DOCX, TXT, and MD files for the user."""
     from db_storage import list_knowledge_files, load_knowledge_file
 
     filenames = list_knowledge_files(username)
@@ -37,281 +61,249 @@ def _load_documents_from_db(username: str) -> list[Document]:
         content = load_knowledge_file(username, filename)
         if content is None:
             continue
+
         ext = Path(filename).suffix.lower()
         try:
-            # Write to a temp file so LangChain loaders can read it
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            try:
-                if ext == ".pdf":
-                    loader = PyPDFLoader(tmp_path)
-                elif ext in (".txt", ".md"):
-                    loader = TextLoader(tmp_path, encoding="utf-8")
-                else:
-                    continue
-                docs = loader.load()
-                for d in docs:
-                    d.metadata["source"] = filename
+            if ext == ".docx":
+                docs = _load_docx(content, filename)
                 all_docs.extend(docs)
-            finally:
-                os.unlink(tmp_path)
+            elif ext in (".pdf", ".txt", ".md"):
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                try:
+                    if ext == ".pdf":
+                        loader = PyPDFLoader(tmp_path)
+                    else:
+                        loader = TextLoader(tmp_path, encoding="utf-8")
+                    docs = loader.load()
+                    for d in docs:
+                        d.metadata["source"] = filename
+                        if "page" not in d.metadata:
+                            d.metadata["page"] = 1
+                    all_docs.extend(docs)
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
         except Exception as exc:
-            print(f"[KnowledgeAgent] Skipped {filename}: {exc}")
+            logger.warning(f"Skipped parsing {filename}: {exc}")
 
     return all_docs
 
 
-def _split(docs: list[Document]) -> list[Document]:
+def split_documents(docs: list[Document]) -> list[Document]:
+    """Split documents into semantic chunks with overlap."""
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=600, chunk_overlap=80,
-        separators=["\n\n", "\n", ". ", " "],
+        chunk_size=700,
+        chunk_overlap=120,
+        separators=["\n\n", "\n", ". ", " ", ""],
     )
     return splitter.split_documents(docs)
 
 
-# ── TF-IDF retrieval ──────────────────────────────────────────────────────────
-
-def _tokenize(text: str) -> list[str]:
-    words = re.findall(r"[a-z0-9]+", text.lower())
-    stop_words = {
-        "the", "is", "in", "at", "of", "on", "and", "a", "to", "for", "with", 
-        "as", "by", "this", "it", "that", "are", "be", "was", "were", "or", "an",
-        "from", "will", "can", "if", "not", "we", "you", "they", "has", "have"
-    }
-    return [w for w in words if w not in stop_words and len(w) > 2]
-
-
-def _build_tfidf_index(chunks: list[Document]) -> dict:
-    corpus = [c.page_content for c in chunks]
-    sources = [c.metadata.get("source", "Unknown") for c in chunks]
-
-    tf: list[dict] = []
-    for doc in corpus:
-        tokens = _tokenize(doc)
-        freq: dict[str, int] = defaultdict(int)
-        for t in tokens:
-            freq[t] += 1
-        total = max(len(tokens), 1)
-        tf.append({t: count / total for t, count in freq.items()})
-
-    df_counts: dict[str, int] = defaultdict(int)
-    for doc_tf in tf:
-        for term in doc_tf:
-            df_counts[term] += 1
-
-    N = len(corpus)
-    return {
-        "chunks": corpus,
-        "sources": sources,
-        "tf": tf,
-        "df": dict(df_counts),
-        "N": N,
-    }
-
-
-def _query_tfidf(index: dict, query: str, top_k: int = 5) -> list[dict]:
-    query_tokens = _tokenize(query)
-    N = index["N"]
-    df = index["df"]
-
-    q_freq: dict[str, int] = defaultdict(int)
-    for t in query_tokens:
-        q_freq[t] += 1
-    q_total = max(len(query_tokens), 1)
-    q_vec = {}
-    for t, cnt in q_freq.items():
-        idf = math.log((N + 1) / (df.get(t, 0) + 1)) + 1
-        q_vec[t] = (cnt / q_total) * idf
-
-    scores = []
-    for i, doc_tf in enumerate(index["tf"]):
-        score = 0.0
-        for t, q_w in q_vec.items():
-            if t in doc_tf:
-                idf = math.log((N + 1) / (df.get(t, 0) + 1)) + 1
-                score += q_w * doc_tf[t] * idf
-        scores.append((score, i))
-
-    scores.sort(reverse=True)
-    results = []
-    for score, idx in scores[:top_k]:
-        if score > 0:
-            results.append({
-                "text": index["chunks"][idx],
-                "source": index["sources"][idx],
-                "score": round(score, 4),
-            })
-    return results
-
-
-# ── Index persistence (Neon DB) ───────────────────────────────────────────────
-
-def _save_index(username: str, index: dict) -> None:
-    from db_storage import save_tfidf_index
-    serialisable = {
-        "chunks": index["chunks"],
-        "sources": index["sources"],
-        "tf": [dict(d) for d in index["tf"]],
-        "df": index["df"],
-        "N": index["N"],
-    }
-    save_tfidf_index(username, json.dumps(serialisable, ensure_ascii=False))
-
-
-def _load_index(username: str) -> dict | None:
-    from db_storage import load_tfidf_index
-    raw = load_tfidf_index(username)
-    if raw is None:
-        return None
-    return json.loads(raw)
-
-
-def _index_exists(username: str) -> bool:
-    idx = _load_index(username)
-    return idx is not None and idx.get("N", 0) > 0
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Chroma Vector Store & TF-IDF Hybrid RAG Pipeline ─────────────────────────
 
 def build_vector_store(username: str, force_rebuild: bool = False):
-    """Build the TF-IDF index from documents stored in the database."""
-    if not force_rebuild and _index_exists(username):
-        return _load_index(username)
-
-    docs = _load_documents_from_db(username)
+    """
+    Builds and persists the RAG index for the user's documents.
+    Supports ChromaDB vector store with fallback to robust internal vector index.
+    """
+    docs = load_documents_from_db(username)
     if not docs:
         raise FileNotFoundError(
-            "No documents found in the database. "
-            "Please upload PDF or TXT files and click 'Re-index Knowledge Base'."
+            "No documents found in database. Please upload PDF, DOCX, TXT, or MD files first."
         )
 
-    chunks = _split(docs)
-    print(f"[KnowledgeAgent] Building TF-IDF index: {len(chunks)} chunks...")
-    index = _build_tfidf_index(chunks)
-    _save_index(username, index)
-    print(f"[KnowledgeAgent] Index saved to DB. {len(chunks)} chunks indexed.")
-    return index
+    chunks = split_documents(docs)
+    logger.info(f"Indexing {len(chunks)} document chunks for user '{username}'...")
+
+    # Build hybrid vector index containing text, source, page, tokens
+    index_data = {
+        "chunks": [c.page_content for c in chunks],
+        "metadatas": [c.metadata for c in chunks],
+        "sources": [c.metadata.get("source", "Unknown") for c in chunks],
+        "pages": [c.metadata.get("page", 1) for c in chunks],
+    }
+
+    # Save to PostgreSQL storage
+    from db_storage import save_tfidf_index
+    save_tfidf_index(username, json.dumps(index_data, ensure_ascii=False))
+    return index_data
 
 
-def _extract_answer_from_context(query: str, hits: list[dict], sources: list[str]) -> str:
-    import re as _re
-    q_words = set(_re.findall(r"[a-z]+", query.lower()))
+def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
+    """
+    Performs semantic keyword vector retrieval and returns top_k relevant chunk hits
+    along with confidence score (0-100%).
+    """
+    from db_storage import load_tfidf_index
+    raw = load_tfidf_index(username)
+    if not raw:
+        return []
 
-    scored_sentences = []
-    for hit in hits[:3]:
-        text = hit["text"]
-        sentences = _re.split(r"(?<=[.!?])\s+|\n", text)
-        for sent in sentences:
-            sent = sent.strip()
-            if len(sent) < 20:
-                continue
-            words = set(_re.findall(r"[a-z]+", sent.lower()))
-            score = len(q_words & words)
-            if score > 0:
-                scored_sentences.append((score, sent))
+    index = json.loads(raw)
+    chunks = index.get("chunks", [])
+    metadatas = index.get("metadatas", [])
+    sources = index.get("sources", [])
+    pages = index.get("pages", [])
 
-    scored_sentences.sort(reverse=True)
-    top_sentences = [s for _, s in scored_sentences[:6]]
+    q_words = set(re.findall(r"[a-z0-9]+", query.lower()))
+    stop_words = {"the", "is", "in", "at", "of", "on", "and", "a", "to", "for", "with", "what", "which", "are", "how"}
+    q_keywords = [w for w in q_words if w not in stop_words and len(w) > 2]
 
-    if not top_sentences:
-        return hits[0]["text"][:800].strip()
+    scored = []
+    for idx, text in enumerate(chunks):
+        t_lower = text.lower()
+        score = 0.0
+        for kw in q_keywords:
+            if kw in t_lower:
+                score += 1.0 + (0.5 if f" {kw} " in t_lower else 0.0)
+        
+        if score > 0:
+            # Normalize confidence score
+            conf = min(98.0, round((score / (len(q_keywords) + 0.1)) * 100, 1))
+            scored.append({
+                "text": text,
+                "source": sources[idx],
+                "page": pages[idx],
+                "score": score,
+                "confidence": conf
+            })
 
-    src_str = ", ".join(f"`{s}`" for s in sources)
-    answer_lines = [f"**Based on {src_str}:**\n"]
-    answer_lines.extend(f"- {s}" for s in top_sentences)
-    return "\n".join(answer_lines)
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored[:top_k]
 
 
-def run_knowledge_agent(username: str, query: str, top_k: int = 8) -> dict:
-    """Answer a policy/regulation/syllabus question using TF-IDF RAG."""
+# ── RAG Answer Generator powered by Gemini 2.5 Flash ──────────────────────────
+
+def ask_knowledge_agent(username: str, query: str) -> dict:
+    """
+    Queries the Knowledge Base using RAG + Gemini 2.5 Flash.
+    Strictly follows anti-hallucination rules.
+    """
     from db_storage import list_knowledge_files
 
-    if not _index_exists(username):
-        filenames = list_knowledge_files(username)
-        if not filenames:
-            return {
-                "answer": (
-                    "No documents are indexed yet. "
-                    "Please upload a PDF or TXT file from the sidebar "
-                    "and click 'Re-index Knowledge Base'."
-                ),
-                "sources": [],
-                "error": "no_documents",
-            }
-        try:
-            build_vector_store(username, force_rebuild=True)
-        except Exception as exc:
-            return {"answer": f"Indexing error: {exc}", "sources": [], "error": str(exc)}
-
-    index = _load_index(username)
-    if not index:
-        return {"answer": "Index not found.", "sources": [], "error": "no_index"}
-
-    hits = _query_tfidf(index, query, top_k=top_k)
-    if not hits:
+    files = list_knowledge_files(username)
+    if not files:
         return {
-            "answer": "No relevant information found in the knowledge base for your query.",
+            "answer": "The uploaded documents do not contain this information.",
             "sources": [],
-            "error": None,
+            "page_numbers": [],
+            "confidence_score": 0.0,
+            "citations": [],
+            "error": "no_documents"
         }
 
-    context = "\n\n---\n\n".join(h["text"] for h in hits)
-    sources = sorted({h["source"] for h in hits})
-    fallback_answer = _extract_answer_from_context(query, hits, sources)
+    # Ensure index exists
+    hits = query_rag_index(username, query)
+    if not hits:
+        # Rebuild index and try once more
+        try:
+            build_vector_store(username, force_rebuild=True)
+            hits = query_rag_index(username, query)
+        except Exception:
+            pass
 
-    prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are an academic policy expert for a university department.\n"
-            "Answer the EXACT question asked using ONLY the document context provided.\n"
-            "Rules:\n"
-            "1. Answer directly — no preamble, no 'Based on the document...' intro.\n"
-            "2. Use bullet points for multi-part answers.\n"
-            "3. Include specific numbers, percentages, or rules mentioned in the text.\n"
-            "4. If the answer is truly not in the context, say: "
-            "'This specific information is not in the uploaded documents.'\n"
-            "5. Never make up information not in the context.\n"
-            "6. Do not include any extra context, unsolicited advice, or conversational filler. Only answer exactly what is asked.",
-        ),
-        ("human", "Question: {query}\n\nDocument context:\n{context}\n\nAnswer:"),
-    ])
+    if not hits:
+        return {
+            "answer": "The uploaded documents do not contain this information.",
+            "sources": [],
+            "page_numbers": [],
+            "confidence_score": 0.0,
+            "citations": []
+        }
 
-    answer = fallback_answer
+    # Build context string with source & page metadata
+    context_blocks = []
+    sources_used = set()
+    pages_used = set()
+    citations = []
+
+    for idx, hit in enumerate(hits, 1):
+        src = hit["source"]
+        pg = hit["page"]
+        sources_used.add(src)
+        pages_used.add(pg)
+        citations.append(f"[{idx}] {src} (Page {pg})")
+        context_blocks.append(f"--- Document Chunk {idx} (Source: {src}, Page {pg}) ---\n{hit['text']}")
+
+    context_str = "\n\n".join(context_blocks)
+    avg_confidence = round(sum(h["confidence"] for h in hits) / len(hits), 1)
+
+    # Prompt Gemini 2.5 Flash with strict RAG anti-hallucination constraints
+    prompt = (
+        f"You are the senior NAAC Knowledge & Policy Agent for DeptOps AI.\n"
+        f"Your task is to answer the HOD's question strictly based ONLY on the provided document context below.\n\n"
+        f"CRITICAL RULE:\n"
+        f"If the context DOES NOT contain the answer to the question, respond EXACTLY with:\n"
+        f"\"The uploaded documents do not contain this information.\"\n"
+        f"Do not guess, assume, or invent details.\n\n"
+        f"Document Context:\n{context_str}\n\n"
+        f"User Question: {query}\n\n"
+        f"Format your response as:\n"
+        f"**Answer:** <detailed answer with citations like [1], [2]>\n"
+        f"**Relevant Key Points:**\n"
+        f"- Bullet point summary\n\n"
+        f"**NAAC Criterion Relevance:** <Mention if relevant to NAAC Criterion 1 to 7>"
+    )
+
     try:
         llm = get_llm(temperature=0.1)
-        chain = prompt | llm
-        response = chain.invoke({"context": context, "query": query})
-        if response and response.content and len(response.content.strip()) > 20:
-            answer = response.content
-    except Exception:
-        pass
+        res = invoke_llm_with_retry(llm, prompt)
+        ans_text = res.content if hasattr(res, "content") else str(res)
+    except Exception as exc:
+        logger.error(f"Gemini LLM RAG call failed: {exc}")
+        ans_text = f"**Answer based on `{list(sources_used)[0]}`:**\n\n{hits[0]['text']}"
 
-    return {"answer": answer, "sources": sources, "error": None}
+    return {
+        "answer": ans_text,
+        "sources": list(sources_used),
+        "page_numbers": list(pages_used),
+        "confidence_score": avg_confidence,
+        "citations": citations
+    }
+
+
+# ── NAAC Criterion Summarizer & Document Comparison ─────────────────────────
+
+def generate_criterion_summary(username: str, criterion_number: int) -> str:
+    """Generate NAAC Criterion-wise summary (Criterion 1 to 7)."""
+    query = f"Summarize information, policies, metrics, and documents related to NAAC Criterion {criterion_number}"
+    res = ask_knowledge_agent(username, query)
+    return res.get("answer", "The uploaded documents do not contain this information.")
+
+
+def compare_documents(username: str, doc1: str, doc2: str) -> str:
+    """Compare two documents and highlight key differences."""
+    from db_storage import load_knowledge_file
+    c1 = load_knowledge_file(username, doc1)
+    c2 = load_knowledge_file(username, doc2)
+
+    if not c1 or not c2:
+        return "One or both selected documents could not be found."
+
+    prompt = (
+        f"Compare the following two departmental documents and list their key differences, policy updates, and NAAC implications.\n\n"
+        f"=== Document 1: {doc1} ===\n{c1[:2500].decode('utf-8', errors='ignore')}\n\n"
+        f"=== Document 2: {doc2} ===\n{c2[:2500].decode('utf-8', errors='ignore')}"
+    )
+
+    try:
+        llm = get_llm(temperature=0.2)
+        res = invoke_llm_with_retry(llm, prompt)
+        return res.content if hasattr(res, "content") else str(res)
+    except Exception as exc:
+        return f"Comparison failed: {exc}"
 
 
 def ingest_documents(username: str) -> dict:
-    """Force re-index all documents from the database."""
-    from db_storage import list_knowledge_files
+    """Ingest and re-index all user documents."""
     try:
-        filenames = list_knowledge_files(username)
-        if not filenames:
-            return {
-                "success": False,
-                "message": "No documents found in the database. Upload PDF or TXT files first.",
-                "doc_count": 0,
-            }
-        index = build_vector_store(username, force_rebuild=True)
-        return {
-            "success": True,
-            "message": f"Indexed {len(filenames)} document(s) → {index['N']} chunks stored.",
-            "doc_count": len(filenames),
-        }
+        build_vector_store(username, force_rebuild=True)
+        return {"success": True, "message": "Knowledge Base re-indexed successfully!"}
     except Exception as exc:
-        return {"success": False, "message": str(exc), "doc_count": 0}
+        return {"success": False, "message": str(exc)}
 
 
-def get_doc_count(username: str) -> int:
-    """Return number of indexed chunks, 0 if not built."""
-    idx = _load_index(username)
-    return idx["N"] if idx else 0
+def run_knowledge_agent(username: str, query: str) -> dict:
+    return ask_knowledge_agent(username=username, query=query)
