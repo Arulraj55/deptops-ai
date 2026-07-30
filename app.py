@@ -271,7 +271,7 @@ with nav_cols[4]:
             <div class="profile-avatar">{_profile_initials(full_name)}</div>
             <div>
                 <strong style="font-size: 0.8rem; display: block;">{full_name}</strong>
-                <span style="font-size: 0.68rem; opacity: 0.75; display: block;">@{username} | {GEMINI_MODEL}</span>
+                <span style="font-size: 0.68rem; opacity: 0.75; display: block;">@{username}</span>
             </div>
         </div>
         """,
@@ -304,10 +304,13 @@ with st.sidebar:
         st.markdown("**📊 Upload Dataset**")
         st.caption("Excel / CSV → Analytics Agent")
         up_csv = st.file_uploader("", type=["csv", "xlsx", "xls"], key="up_csv", label_visibility="collapsed")
-        if up_csv:
+        if up_csv and st.session_state.get("_last_uploaded_csv") != up_csv.name:
             db_storage.save_analytics_file(username, up_csv.name, up_csv.getbuffer().tobytes())
             st.success(f"✅ Saved `{up_csv.name}`")
             get_datasets.clear()
+            st.session_state["_last_uploaded_csv"] = up_csv.name
+            st.session_state.nav_page = "analytics"
+            st.rerun()
 
     st.markdown('<div style="height: 8px;"></div>', unsafe_allow_html=True)
 
@@ -316,10 +319,13 @@ with st.sidebar:
         st.markdown("**📚 Upload Document**")
         st.caption("PDF / DOCX / TXT / MD → Knowledge Base")
         up_doc = st.file_uploader("", type=["pdf", "docx", "txt", "md"], key="up_doc", label_visibility="collapsed")
-        if up_doc:
+        if up_doc and st.session_state.get("_last_uploaded_doc") != up_doc.name:
             db_storage.save_knowledge_file(username, up_doc.name, up_doc.getbuffer().tobytes())
             st.success(f"✅ Saved `{up_doc.name}`")
             get_doc_list.clear()
+            st.session_state["_last_uploaded_doc"] = up_doc.name
+            st.session_state.nav_page = "knowledge"
+            st.rerun()
 
         docs = get_doc_list(username)
         chunks = get_chunk_count(username)
@@ -370,7 +376,9 @@ if st.session_state.nav_page == "coordinator":
             web_res = run_website_testing_agent(quick_url.strip(), username=username)
             progress_bar.progress(100, text="Audit Complete!")
 
-        st.session_state.last_coord_result = {"intent": "website", "result": web_res, "query": f"Website Audit for {quick_url}"}
+        st.session_state.web_page_result = web_res
+        st.session_state.nav_page = "website"
+        st.rerun()
 
     # Query Input Box
     with st.container(border=True):
@@ -589,7 +597,7 @@ elif st.session_state.nav_page == "website":
             prog = st.progress(0, text="Initializing crawler...")
             for val in range(25, 100, 25):
                 prog.progress(val, text=f"Inspecting pages and security headers... ({val}%)")
-            from agents.website_testing_agent import run_website_testing_agent, generate_website_pdf_report
+            from agents.website_testing_agent import run_website_testing_agent
             web_res = run_website_testing_agent(w_url.strip(), username=username)
             prog.progress(100, text="Audit Complete!")
             st.session_state.web_page_result = web_res
@@ -631,5 +639,6 @@ elif st.session_state.nav_page == "website":
             st.dataframe(pd.DataFrame(rows), use_container_width=True, height=280)
 
         st.divider()
+        from agents.website_testing_agent import generate_website_pdf_report
         pdf_bytes = generate_website_pdf_report(w_url.strip(), summary, w_res.get("ai_report", ""))
         st.download_button("📥 Download PDF Web Audit Report", data=pdf_bytes, file_name=f"Website_Audit_Report.pdf", mime="application/pdf", use_container_width=True)

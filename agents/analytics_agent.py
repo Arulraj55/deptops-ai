@@ -236,24 +236,34 @@ def generate_visualizations(df: pd.DataFrame, col_info: dict) -> list[dict]:
     # 4. Scatter Plot if 2+ Numerical columns exist
     if len(num_cols) >= 2:
         col_x, col_y = num_cols[0], num_cols[1]
-        fig_scat = px.scatter(
-            df, x=col_x, y=col_y, color=cat_cols[0] if cat_cols else None,
-            title=f"📍 Comparison: {col_x} vs {col_y} (Scatter Plot)",
-            trendline="ols" if len(df) > 5 else None
-        )
+        try:
+            fig_scat = px.scatter(
+                df, x=col_x, y=col_y, color=cat_cols[0] if cat_cols else None,
+                title=f"📍 Comparison: {col_x} vs {col_y} (Scatter Plot)",
+                trendline="ols" if len(df) > 5 else None
+            )
+        except Exception as t_err:
+            logger.warning(f"Scatter plot trendline generation fallback (statsmodels issue): {t_err}")
+            fig_scat = px.scatter(
+                df, x=col_x, y=col_y, color=cat_cols[0] if cat_cols else None,
+                title=f"📍 Comparison: {col_x} vs {col_y} (Scatter Plot)"
+            )
         fig_scat.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
         charts.append({"title": f"{col_x} vs {col_y} Scatter Plot", "type": "scatter", "fig": fig_scat})
 
     # 5. Heatmap / Correlation Matrix if 3+ Numerical columns exist
     num_df = df[num_cols].select_dtypes(include="number")
     if num_df.shape[1] > 1:
-        corr = num_df.corr().round(2)
-        fig_corr = px.imshow(
-            corr, text_auto=True, title="🔗 Correlation Matrix Heatmap",
-            color_continuous_scale="RdBu_r", zmin=-1, zmax=1
-        )
-        fig_corr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        charts.append({"title": "Correlation Matrix Heatmap", "type": "heatmap", "fig": fig_corr})
+        try:
+            corr = num_df.corr().round(2)
+            fig_corr = px.imshow(
+                corr, text_auto=True, title="🔗 Correlation Matrix Heatmap",
+                color_continuous_scale="RdBu_r", zmin=-1, zmax=1
+            )
+            fig_corr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            charts.append({"title": "Correlation Matrix Heatmap", "type": "heatmap", "fig": fig_corr})
+        except Exception as c_err:
+            logger.warning(f"Correlation heatmap error: {c_err}")
 
     return charts
 
