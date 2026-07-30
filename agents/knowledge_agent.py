@@ -264,8 +264,37 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
         ans_text = res.content if hasattr(res, "content") else str(res)
     except Exception as exc:
         logger.error(f"Gemini LLM RAG call failed: {exc}")
-        clean_excerpt = _clean_text(hits[0]['text'])[:500]
-        ans_text = f"**Information from `{hits[0]['source']}`:**\n\n{clean_excerpt}"
+        # Smart fallback: extract topic-specific lines from retrieved chunks
+        q_lower = query.lower()
+        # Extract meaningful topic keywords from query
+        topic_words = set(re.findall(r"[a-z]+", q_lower)) - {"give", "me", "list", "show", "tell", "questions", "ques", "what", "the", "under", "from", "about", "how", "many", "are", "and", "for", "some", "best", "top"}
+        
+        # Parse a quantity if user asked for N items (e.g. "5 questions")
+        qty_match = re.search(r"(\d+)", query)
+        max_items = int(qty_match.group(1)) if qty_match else 10
+        
+        # Search all hit chunks for lines matching topic keywords
+        matching_lines = []
+        for hit in hits:
+            lines = hit["text"].split("\n")
+            for line in lines:
+                line_clean = line.strip()
+                if not line_clean or len(line_clean) < 5:
+                    continue
+                line_lower = line_clean.lower()
+                if topic_words and any(tw in line_lower for tw in topic_words):
+                    if line_clean not in matching_lines:
+                        matching_lines.append(line_clean)
+        
+        if matching_lines:
+            src_name = hits[0]["source"]
+            ans_text = f"**Relevant content from `{src_name}`:**\n\n"
+            for i, line in enumerate(matching_lines[:max_items], 1):
+                ans_text += f"{i}. {line}\n"
+            ans_text += f"\n> ⚠️ *AI analysis unavailable. Showing {min(len(matching_lines), max_items)} matching items from your documents.*"
+        else:
+            clean_excerpt = _clean_text(hits[0]["text"])[:400]
+            ans_text = f"**Information from `{hits[0]['source']}`:**\n\n{clean_excerpt}\n\n> ⚠️ *AI analysis temporarily unavailable.*"
 
     return {
         "answer": ans_text,

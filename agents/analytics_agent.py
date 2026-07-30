@@ -398,12 +398,45 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
         answer = res.content if hasattr(res, "content") else str(res)
     except Exception as exc:
         logger.error(f"Gemini LLM call failed for Analytics Agent: {exc}")
-        answer = f"**Data Summary for `{target_file}`:**\n\n"
+        # Build a smart, question-aware fallback from actual stats
+        answer = f"## 📊 Data Analysis for `{target_file}`\n\n"
+
+        # Try to find query-specific data in group-by summaries
+        q_lower = query.lower()
+        found_specific = False
         if "group_by_summaries" in stats:
-            for k, v in stats["group_by_summaries"].items():
-                answer += f"### {k} Distribution:\n"
-                for cat_val, cnt in v.get("record_counts", {}).items():
-                    answer += f"- **{cat_val}**: {cnt} records\n"
+            for cat_name, g_info in stats["group_by_summaries"].items():
+                counts = g_info.get("record_counts", {})
+                means = g_info.get("means", {})
+                # Check if user asked about a specific category value
+                for cat_val, cnt in counts.items():
+                    if cat_val.lower() in q_lower:
+                        found_specific = True
+                        answer += f"### {cat_name}: **{cat_val}**\n"
+                        answer += f"- **Total Students/Records**: {cnt}\n"
+                        if means:
+                            for metric_name, metric_vals in means.items():
+                                if isinstance(metric_vals, dict) and cat_val in metric_vals:
+                                    answer += f"- **Average {metric_name}**: {metric_vals[cat_val]}\n"
+                        answer += "\n"
+
+        if not found_specific:
+            # General summary
+            if "group_by_summaries" in stats:
+                for k, v in stats["group_by_summaries"].items():
+                    answer += f"### {k} Breakdown\n\n"
+                    answer += "| Category | Records |\n|---|---|\n"
+                    for cat_val, cnt in v.get("record_counts", {}).items():
+                        answer += f"| **{cat_val}** | {cnt} |\n"
+                    answer += "\n"
+            if "highest_lowest" in stats:
+                answer += "### Key Numeric Metrics\n\n"
+                answer += "| Metric | Mean | Max | Min |\n|---|---|---|---|\n"
+                for col, vals in stats["highest_lowest"].items():
+                    answer += f"| **{col}** | {vals['mean']} | {vals['max']} | {vals['min']} |\n"
+                answer += "\n"
+
+        answer += "\n> ⚠️ *AI analysis is temporarily unavailable. Showing statistical summary from your data.*"
 
     return {
         "answer": answer,
@@ -425,6 +458,7 @@ def compare_datasets(username: str, ds1: str, ds2: str) -> str:
     stats1 = analyze_dataset(df1, ds1)
     stats2 = analyze_dataset(df2, ds2)
 
+    # Try LLM comparison
     prompt = (
         f"You are the senior NAAC Academic Analytics AI Agent for DeptOps AI.\n"
         f"Compare the following two academic datasets and generate a comprehensive comparative report.\n\n"
@@ -448,7 +482,43 @@ def compare_datasets(username: str, ds1: str, ds2: str) -> str:
         res = invoke_llm_with_retry(llm, prompt)
         return res.content if hasattr(res, "content") else str(res)
     except Exception as exc:
-        return f"Dataset comparison error: {exc}"
+        logger.error(f"LLM comparison failed: {exc}")
+        # Build statistical fallback comparison
+        report = f"## ⚖️ Dataset Comparison: `{ds1}` vs `{ds2}`\n\n"
+        report += "### Overview\n\n"
+        report += "| Attribute | Dataset 1 | Dataset 2 |\n|---|---|---|\n"
+        report += f"| **File** | {ds1} | {ds2} |\n"
+        report += f"| **Total Records** | {len(df1)} | {len(df2)} |\n"
+        report += f"| **Total Columns** | {len(df1.columns)} | {len(df2.columns)} |\n"
+        report += f"| **Columns** | {', '.join(df1.columns[:5])} | {', '.join(df2.columns[:5])} |\n\n"
+
+        # Compare numeric metrics
+        hl1 = stats1.get("highest_lowest", {})
+        hl2 = stats2.get("highest_lowest", {})
+        common_metrics = set(hl1.keys()) & set(hl2.keys())
+        if common_metrics:
+            report += "### Numeric Metrics Comparison\n\n"
+            report += "| Metric | DS1 Mean | DS2 Mean | DS1 Max | DS2 Max |\n|---|---|---|---|---|\n"
+            for m in common_metrics:
+                report += f"| **{m}** | {hl1[m]['mean']} | {hl2[m]['mean']} | {hl1[m]['max']} | {hl2[m]['max']} |\n"
+            report += "\n"
+
+        # Compare categorical distributions
+        gs1 = stats1.get("group_by_summaries", {})
+        gs2 = stats2.get("group_by_summaries", {})
+        common_cats = set(gs1.keys()) & set(gs2.keys())
+        for cat in common_cats:
+            report += f"### {cat} Distribution Comparison\n\n"
+            all_vals = set(gs1[cat].get("record_counts", {}).keys()) | set(gs2[cat].get("record_counts", {}).keys())
+            report += f"| {cat} | DS1 Count | DS2 Count |\n|---|---|---|\n"
+            for v in sorted(all_vals):
+                c1 = gs1[cat].get("record_counts", {}).get(v, 0)
+                c2 = gs2[cat].get("record_counts", {}).get(v, 0)
+                report += f"| **{v}** | {c1} | {c2} |\n"
+            report += "\n"
+
+        report += "\n> ⚠️ *AI analysis is temporarily unavailable. Showing statistical comparison from your data.*"
+        return report
 
 
 # ── Report Exporters (PDF & Excel) ───────────────────────────────────────────
