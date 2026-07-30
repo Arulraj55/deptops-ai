@@ -45,10 +45,11 @@ def detect_column_types(df: pd.DataFrame) -> dict:
     """
     Automatically detects column categories:
     - numerical
-    - categorical
+    - categorical (excludes unique names/IDs)
     - percentage
     - date
     - year
+    - id_cols (names, roll numbers, reg numbers)
     """
     col_info = {
         "numerical": [],
@@ -56,8 +57,11 @@ def detect_column_types(df: pd.DataFrame) -> dict:
         "percentage": [],
         "date": [],
         "year": [],
+        "id_cols": [],
         "all_clean": [str(c).strip() for c in df.columns]
     }
+
+    ID_KEYWORDS = {"name", "student_name", "student", "roll", "roll_no", "rollno", "reg", "reg_no", "regno", "register", "register_no", "id", "email", "sno", "s_no", "serial"}
 
     for orig_col in df.columns:
         clean = str(orig_col).strip()
@@ -65,6 +69,11 @@ def detect_column_types(df: pd.DataFrame) -> dict:
         series = df[orig_col].dropna()
 
         if series.empty:
+            continue
+
+        # Check if ID / Name column
+        if any(k in clean_lower for k in ID_KEYWORDS) and not any(k in clean_lower for k in ("dept", "department", "branch", "grade", "status", "year", "session")):
+            col_info["id_cols"].append(clean)
             continue
 
         # Check year column
@@ -96,12 +105,15 @@ def detect_column_types(df: pd.DataFrame) -> dict:
 
         # Check numeric vs categorical
         if pd.api.types.is_numeric_dtype(series):
-            # Check if percentage values (0-100)
             if series.min() >= 0 and series.max() <= 100 and ("att" in clean_lower or "pass" in clean_lower):
                 col_info["percentage"].append(clean)
             col_info["numerical"].append(clean)
         else:
-            col_info["categorical"].append(clean)
+            # If high cardinality (unique values == row count), treat as ID col unless it's dept/branch
+            if series.nunique() > len(series) * 0.8 and not any(k in clean_lower for k in ("dept", "department", "branch", "course")):
+                col_info["id_cols"].append(clean)
+            else:
+                col_info["categorical"].append(clean)
 
     return col_info
 
@@ -111,7 +123,7 @@ def detect_column_types(df: pd.DataFrame) -> dict:
 def analyze_dataset(df: pd.DataFrame, filename: str) -> dict:
     """
     Generates statistical summary, key insights, highest/lowest, averages,
-    anomalies, and percentage improvements across any academic dataset.
+    group-by aggregations, anomalies, and percentage improvements.
     """
     col_info = detect_column_types(df)
     stats: dict = {"col_types": col_info, "filename": filename, "total_rows": len(df), "total_cols": len(df.columns)}
@@ -125,7 +137,6 @@ def analyze_dataset(df: pd.DataFrame, filename: str) -> dict:
         desc = df[num_cols].describe().round(2).to_dict()
         stats["numeric_summary"] = desc
 
-        # Highest & Lowest identification
         highest_lowest = {}
         for col in num_cols:
             highest_lowest[col] = {
@@ -136,7 +147,6 @@ def analyze_dataset(df: pd.DataFrame, filename: str) -> dict:
             }
         stats["highest_lowest"] = highest_lowest
 
-        # Anomaly detection (z-score > 2.5 or values outside 1.5 IQR)
         anomalies = {}
         for col in num_cols:
             s = df[col].dropna()
@@ -148,13 +158,27 @@ def analyze_dataset(df: pd.DataFrame, filename: str) -> dict:
                     anomalies[col] = len(outliers)
         stats["anomalies"] = anomalies
 
-    # 2. Year-over-Year comparison if year column exists
+    # 2. Group-by breakdown for categorical columns (e.g. Department, Branch, Section)
+    group_by_summaries = {}
+    for c_col in cat_cols:
+        if df[c_col].nunique() <= 30:
+            counts = df[c_col].astype(str).value_counts().to_dict()
+            grp_data = {"record_counts": counts}
+            if num_cols:
+                try:
+                    num_means = df.groupby(c_col)[num_cols].mean().round(2).to_dict()
+                    grp_data["means"] = num_means
+                except Exception:
+                    pass
+            group_by_summaries[c_col] = grp_data
+    stats["group_by_summaries"] = group_by_summaries
+
+    # 3. Year-over-Year comparison if year column exists
     if year_cols and num_cols:
         y_col = year_cols[0]
         y_grouped = df.groupby(y_col)[num_cols].mean().round(2)
         stats["year_comparison"] = y_grouped.to_dict()
 
-        # Calculate YoY percentage improvement
         yoy_pct = {}
         sorted_years = sorted(y_grouped.index.tolist())
         if len(sorted_years) >= 2:
@@ -167,10 +191,10 @@ def analyze_dataset(df: pd.DataFrame, filename: str) -> dict:
                     yoy_pct[col] = {"from_year": str(prev), "to_year": str(curr), "change_pct": chg}
         stats["year_improvements"] = yoy_pct
 
-    # 3. Categorical distribution summaries
+    # 4. Categorical distribution summaries
     cat_summary = {}
     for col in cat_cols[:4]:
-        val_counts = df[col].astype(str).value_counts().head(5).to_dict()
+        val_counts = df[col].astype(str).value_counts().head(10).to_dict()
         cat_summary[col] = val_counts
     stats["cat_summary"] = cat_summary
 
@@ -182,7 +206,7 @@ def analyze_dataset(df: pd.DataFrame, filename: str) -> dict:
 def generate_visualizations(df: pd.DataFrame, col_info: dict) -> list[dict]:
     """
     Selects and creates the best Plotly charts based on column types.
-    Returns list of dicts: {"title": str, "chart_type": str, "fig": plotly_figure}
+    Avoids charts on student names/IDs and focuses on Department, Branch, Grade, Performance.
     """
     import plotly.express as px
     import plotly.graph_objects as go
@@ -192,79 +216,112 @@ def generate_visualizations(df: pd.DataFrame, col_info: dict) -> list[dict]:
     cat_cols = col_info["categorical"]
     year_cols = col_info["year"]
 
-    # 1. Bar Chart / Trend Line for Year comparison
-    if year_cols and num_cols:
-        y_col = year_cols[0]
-        v_col = num_cols[0]
-        fig_trend = px.line(
-            df.groupby(y_col, as_index=False)[v_col].mean(),
-            x=y_col, y=v_col, markers=True,
-            title=f"📈 {v_col} Trend Across Years",
-            color_discrete_sequence=["#0f9d8a"]
-        )
-        fig_trend.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        charts.append({"title": f"{v_col} Trend Chart", "type": "trend", "fig": fig_trend})
+    # Pick best group column (prioritize Department, Branch, Section, Grade)
+    best_cat = None
+    for c in cat_cols:
+        c_lower = c.lower()
+        if any(k in c_lower for k in ("dept", "department", "branch", "course", "section")):
+            best_cat = c
+            break
+    if not best_cat and cat_cols:
+        best_cat = cat_cols[0]
 
-    # 2. Categorical Bar Chart / Pie Chart
-    if cat_cols:
-        c_col = cat_cols[0]
-        vc = df[c_col].astype(str).value_counts().reset_index()
-        vc.columns = [c_col, "Count"]
-
-        if len(vc) <= 6:
-            fig_pie = px.pie(
-                vc, names=c_col, values="Count", title=f"📊 Distribution of {c_col}",
-                color_discrete_sequence=px.colors.qualitative.Set3
+    # 1. Grouped Bar Chart of Averages by Category/Department
+    if best_cat and num_cols:
+        try:
+            val_col = num_cols[0]
+            grouped_df = df.groupby(best_cat, as_index=False)[val_col].mean().round(2)
+            grouped_df = grouped_df.sort_values(by=val_col, ascending=False).head(15)
+            fig_grp = px.bar(
+                grouped_df, x=best_cat, y=val_col, color=val_col, text_auto=True,
+                title=f"📊 Average {val_col} by {best_cat}",
+                color_continuous_scale="Tealgrn"
             )
-            fig_pie.update_layout(paper_bgcolor="rgba(0,0,0,0)")
-            charts.append({"title": f"{c_col} Pie Chart", "type": "pie", "fig": fig_pie})
+            fig_grp.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            charts.append({"title": f"Average {val_col} by {best_cat}", "type": "grouped_bar", "fig": fig_grp})
+        except Exception as e:
+            logger.warning(f"Grouped bar chart error: {e}")
 
-        fig_bar = px.bar(
-            vc.head(10), x=c_col, y="Count", color="Count", text_auto=True,
-            title=f"📊 {c_col} Counts (Bar Chart)", color_continuous_scale="Viridis"
-        )
-        fig_bar.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        charts.append({"title": f"{c_col} Bar Chart", "type": "bar", "fig": fig_bar})
+    # 2. Categorical Distribution (Department / Branch / Grade Distribution)
+    if best_cat:
+        try:
+            vc = df[best_cat].astype(str).value_counts().reset_index()
+            vc.columns = [best_cat, "Count"]
 
-    # 3. Histogram / Box Plot for Numerical Columns
+            if len(vc) <= 7:
+                fig_pie = px.pie(
+                    vc, names=best_cat, values="Count", title=f"📊 Distribution by {best_cat}",
+                    color_discrete_sequence=px.colors.qualitative.Set3
+                )
+                fig_pie.update_layout(paper_bgcolor="rgba(0,0,0,0)")
+                charts.append({"title": f"{best_cat} Pie Distribution", "type": "pie", "fig": fig_pie})
+
+            fig_bar = px.bar(
+                vc.head(12), x=best_cat, y="Count", color="Count", text_auto=True,
+                title=f"📊 Record Count by {best_cat}", color_continuous_scale="Viridis"
+            )
+            fig_bar.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            charts.append({"title": f"{best_cat} Count Bar Chart", "type": "bar", "fig": fig_bar})
+        except Exception as e:
+            logger.warning(f"Categorical chart error: {e}")
+
+    # 3. Year Trend Chart
+    if year_cols and num_cols:
+        try:
+            y_col = year_cols[0]
+            v_col = num_cols[0]
+            fig_trend = px.line(
+                df.groupby(y_col, as_index=False)[v_col].mean(),
+                x=y_col, y=v_col, markers=True,
+                title=f"📈 {v_col} Trend Across {y_col}",
+                color_discrete_sequence=["#0f9d8a"]
+            )
+            fig_trend.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            charts.append({"title": f"{v_col} Trend Chart", "type": "trend", "fig": fig_trend})
+        except Exception as e:
+            logger.warning(f"Trend chart error: {e}")
+
+    # 4. Histogram / Box Plot for Numerical Metrics
     if num_cols:
         for n_col in num_cols[:2]:
-            fig_hist = px.histogram(
-                df, x=n_col, nbins=20, title=f"📉 Distribution of {n_col} (Histogram)",
-                color_discrete_sequence=["#2f7cb8"], marginal="box"
-            )
-            fig_hist.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            charts.append({"title": f"{n_col} Histogram & Box Plot", "type": "histogram", "fig": fig_hist})
+            try:
+                fig_hist = px.histogram(
+                    df, x=n_col, nbins=20, title=f"📉 Distribution of {n_col} (Histogram & Box)",
+                    color_discrete_sequence=["#2f7cb8"], marginal="box"
+                )
+                fig_hist.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                charts.append({"title": f"{n_col} Histogram", "type": "histogram", "fig": fig_hist})
+            except Exception as e:
+                logger.warning(f"Histogram error: {e}")
 
-    # 4. Scatter Plot if 2+ Numerical columns exist
+    # 5. Scatter Plot if 2+ Numerical columns exist
     if len(num_cols) >= 2:
         col_x, col_y = num_cols[0], num_cols[1]
         try:
             fig_scat = px.scatter(
-                df, x=col_x, y=col_y, color=cat_cols[0] if cat_cols else None,
-                title=f"📍 Comparison: {col_x} vs {col_y} (Scatter Plot)",
+                df, x=col_x, y=col_y, color=best_cat,
+                title=f"📍 Comparison: {col_x} vs {col_y}",
                 trendline="ols" if len(df) > 5 else None
             )
-        except Exception as t_err:
-            logger.warning(f"Scatter plot trendline generation fallback (statsmodels issue): {t_err}")
+        except Exception:
             fig_scat = px.scatter(
-                df, x=col_x, y=col_y, color=cat_cols[0] if cat_cols else None,
-                title=f"📍 Comparison: {col_x} vs {col_y} (Scatter Plot)"
+                df, x=col_x, y=col_y, color=best_cat,
+                title=f"📍 Comparison: {col_x} vs {col_y}"
             )
         fig_scat.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
         charts.append({"title": f"{col_x} vs {col_y} Scatter Plot", "type": "scatter", "fig": fig_scat})
 
-    # 5. Heatmap / Correlation Matrix if 3+ Numerical columns exist
+    # 6. Heatmap / Correlation Matrix
     num_df = df[num_cols].select_dtypes(include="number")
     if num_df.shape[1] > 1:
         try:
             corr = num_df.corr().round(2)
             fig_corr = px.imshow(
-                corr, text_auto=True, title="🔗 Correlation Matrix Heatmap",
+                corr, text_auto=True, title="🔗 Metric Correlation Matrix Heatmap",
                 color_continuous_scale="RdBu_r", zmin=-1, zmax=1
             )
             fig_corr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            charts.append({"title": "Correlation Matrix Heatmap", "type": "heatmap", "fig": fig_corr})
+            charts.append({"title": "Correlation Heatmap", "type": "heatmap", "fig": fig_corr})
         except Exception as c_err:
             logger.warning(f"Correlation heatmap error: {c_err}")
 
@@ -298,60 +355,55 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
     col_info = stats["col_types"]
     charts = generate_visualizations(df, col_info)
 
-    # Build rich prompt for Gemini with full data context for accuracy
-    data_preview = df.head(50).to_string(index=False)
+    # Build rich prompt with department & group-by summaries for exact AI responses
     context_str = (
         f"Dataset: {target_file}\n"
         f"Total Rows: {len(df)}, Total Columns: {len(df.columns)}\n"
-        f"Column Names: {list(df.columns)}\n\n"
+        f"Columns List: {list(df.columns)}\n\n"
     )
+    if "group_by_summaries" in stats and stats["group_by_summaries"]:
+        context_str += "Departmental / Categorical Aggregations & Breakdown:\n"
+        for c_name, g_info in stats["group_by_summaries"].items():
+            context_str += f"=== Category: '{c_name}' ===\n"
+            context_str += f"  - Counts: {g_info.get('record_counts')}\n"
+            if "means" in g_info:
+                context_str += f"  - Averages: {g_info.get('means')}\n"
+        context_str += "\n"
+
     if "highest_lowest" in stats:
-        context_str += "Key Numeric Metrics (Min/Max/Mean/Std):\n"
+        context_str += "Overall Numeric Metrics (Min/Max/Mean/StdDev):\n"
         for col_name, vals in stats["highest_lowest"].items():
-            context_str += f"  - {col_name}: Mean={vals['mean']}, Max={vals['max']}, Min={vals['min']}, StdDev={vals['std']}\n"
+            context_str += f"  - {col_name}: Mean={vals['mean']}, Max={vals['max']}, Min={vals['min']}\n"
         context_str += "\n"
-    if "cat_summary" in stats:
-        context_str += "Categorical Column Value Counts:\n"
-        for col_name, counts in stats["cat_summary"].items():
-            context_str += f"  - {col_name}: {counts}\n"
-        context_str += "\n"
-    if "year_improvements" in stats:
-        context_str += "Year-over-Year Percentage Changes:\n"
-        for col_name, vals in stats["year_improvements"].items():
-            context_str += f"  - {col_name}: {vals['change_pct']}% ({vals['from_year']} → {vals['to_year']})\n"
-        context_str += "\n"
-    if "anomalies" in stats and stats["anomalies"]:
-        context_str += f"Detected Outliers: {stats['anomalies']}\n\n"
-    context_str += f"Data (up to 50 rows):\n{data_preview}"
+
+    data_preview = df.head(50).to_string(index=False)
+    context_str += f"Full Data (First 50 Rows):\n{data_preview}"
 
     answer = ""
     try:
         llm = get_llm(temperature=0.1)
         prompt = (
-            f"You are the NAAC Academic Analytics AI Agent for DeptOps AI.\n"
-            f"You MUST answer ONLY using the actual data provided below. Do NOT guess, invent, or hallucinate numbers.\n"
-            f"If the data does not contain enough information to answer, say so clearly.\n\n"
-            f"--- DATA CONTEXT ---\n{context_str}\n--- END DATA ---\n\n"
+            f"You are the senior NAAC Academic Analytics AI Agent for DeptOps AI.\n"
+            f"Answer the user's specific question accurately and directly using ONLY the dataset context provided below.\n"
+            f"If asked about a specific department (e.g. CSE, IT, ECE), search the Category Breakdown and Data table and give EXACT numbers (student count, pass rate, avg marks/CGPA).\n\n"
+            f"--- DATASET CONTEXT ---\n{context_str}\n--- END DATASET ---\n\n"
             f"User Question: {query}\n\n"
-            f"Instructions for your response:\n"
-            f"1. Answer with EXACT numbers from the data. Use tables where appropriate.\n"
-            f"2. Format your response in clean Markdown with headers (##), bullet points, bold for key numbers, and tables.\n"
-            f"3. Highlight key findings: highest, lowest, trends, and any anomalies.\n"
-            f"4. End with 2-3 concise NAAC-relevant recommendations based on the data.\n"
-            f"5. Keep the response well-structured and professional."
+            f"Formatting Guidelines:\n"
+            f"1. Direct, clear answer with EXACT numbers and counts from the data. Use Markdown tables if multiple departments or metrics are compared.\n"
+            f"2. Use bold (**text**) for key figures, metrics, and department names.\n"
+            f"3. Structure with clean section headers (##) and bullet points.\n"
+            f"4. Conclude with 2-3 specific NAAC accreditation insights based on the figures."
         )
         res = invoke_llm_with_retry(llm, prompt)
         answer = res.content if hasattr(res, "content") else str(res)
     except Exception as exc:
         logger.error(f"Gemini LLM call failed for Analytics Agent: {exc}")
-        # Direct rule-based fallback answer
         answer = f"**Data Summary for `{target_file}`:**\n\n"
-        if "highest_lowest" in stats:
-            for k, v in stats["highest_lowest"].items():
-                answer += f"- **{k}**: Avg = {v['mean']}, Max = {v['max']}, Min = {v['min']}\n"
-        if "year_improvements" in stats:
-            for k, v in stats["year_improvements"].items():
-                answer += f"- **{k} Change ({v['from_year']} -> {v['to_year']})**: {v['change_pct']}%\n"
+        if "group_by_summaries" in stats:
+            for k, v in stats["group_by_summaries"].items():
+                answer += f"### {k} Distribution:\n"
+                for cat_val, cnt in v.get("record_counts", {}).items():
+                    answer += f"- **{cat_val}**: {cnt} records\n"
 
     return {
         "answer": answer,
@@ -360,6 +412,43 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
         "file_used": target_file,
         "dataframe": df
     }
+
+
+def compare_datasets(username: str, ds1: str, ds2: str) -> str:
+    """Compares two uploaded datasets and provides a detailed analytical diff report."""
+    try:
+        df1 = _load_dataframe(username, ds1)
+        df2 = _load_dataframe(username, ds2)
+    except Exception as exc:
+        return f"Error loading datasets for comparison: {exc}"
+
+    stats1 = analyze_dataset(df1, ds1)
+    stats2 = analyze_dataset(df2, ds2)
+
+    prompt = (
+        f"You are the senior NAAC Academic Analytics AI Agent for DeptOps AI.\n"
+        f"Compare the following two academic datasets and generate a comprehensive comparative report.\n\n"
+        f"=== Dataset 1: {ds1} ===\n"
+        f"Rows: {len(df1)}, Columns: {list(df1.columns)}\n"
+        f"Summary Metrics: {stats1.get('highest_lowest', {})}\n"
+        f"Group Breakdowns: {stats1.get('group_by_summaries', {})}\n\n"
+        f"=== Dataset 2: {ds2} ===\n"
+        f"Rows: {len(df2)}, Columns: {list(df2.columns)}\n"
+        f"Summary Metrics: {stats2.get('highest_lowest', {})}\n"
+        f"Group Breakdowns: {stats2.get('group_by_summaries', {})}\n\n"
+        f"Generate:\n"
+        f"1. Executive Side-by-Side Summary Table comparing total records, columns, key averages.\n"
+        f"2. Major Improvements & Key Changes between Dataset 1 and Dataset 2.\n"
+        f"3. Department/Category level comparison highlights.\n"
+        f"4. NAAC Peer Team Review recommendations based on the comparison."
+    )
+
+    try:
+        llm = get_llm(temperature=0.1)
+        res = invoke_llm_with_retry(llm, prompt)
+        return res.content if hasattr(res, "content") else str(res)
+    except Exception as exc:
+        return f"Dataset comparison error: {exc}"
 
 
 # ── Report Exporters (PDF & Excel) ───────────────────────────────────────────

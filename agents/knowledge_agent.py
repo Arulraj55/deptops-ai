@@ -33,6 +33,21 @@ logger = logging.getLogger("KnowledgeAgent")
 
 # ── Document Loader Engine (PDF, DOCX, TXT, MD) ──────────────────────────────
 
+def _clean_text(text: str) -> str:
+    """Cleans up messy PDF symbols, redundant bullet spam, and whitespace."""
+    if not text:
+        return ""
+    # Remove repetitive bullet symbols like ●, ■, ◆, etc.
+    text = re.sub(r"[●■◆▲★]+", "", text)
+    # Replace non-breaking space and tabs
+    text = text.replace("\xa0", " ").replace("\t", " ")
+    # Replace multiple spaces with a single space
+    text = re.sub(r" {2,}", " ", text)
+    # Clean up empty bullet lists
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    return "\n".join(lines)
+
+
 def _load_docx(file_bytes: bytes, filename: str) -> list[Document]:
     """Extract text from a .docx Word document."""
     try:
@@ -41,8 +56,9 @@ def _load_docx(file_bytes: bytes, filename: str) -> list[Document]:
         doc = docx.Document(buf)
         full_text = []
         for p in doc.paragraphs:
-            if p.text.strip():
-                full_text.append(p.text)
+            clean_p = _clean_text(p.text)
+            if clean_p:
+                full_text.append(clean_p)
         content = "\n\n".join(full_text)
         return [Document(page_content=content, metadata={"source": filename, "page": 1})]
     except Exception as exc:
@@ -74,14 +90,18 @@ def load_documents_from_db(username: str) -> list[Document]:
                 try:
                     if ext == ".pdf":
                         loader = PyPDFLoader(tmp_path)
+                        parsed_docs = loader.load()
                     else:
                         loader = TextLoader(tmp_path, encoding="utf-8")
-                    docs = loader.load()
-                    for d in docs:
+                        parsed_docs = loader.load()
+
+                    for d in parsed_docs:
+                        d.page_content = _clean_text(d.page_content)
                         d.metadata["source"] = filename
                         if "page" not in d.metadata:
                             d.metadata["page"] = 1
-                    all_docs.extend(docs)
+                        if d.page_content.strip():
+                            all_docs.append(d)
                 finally:
                     if os.path.exists(tmp_path):
                         os.unlink(tmp_path)
@@ -106,7 +126,6 @@ def split_documents(docs: list[Document]) -> list[Document]:
 def build_vector_store(username: str, force_rebuild: bool = False):
     """
     Builds and persists the RAG index for the user's documents.
-    Supports ChromaDB vector store with fallback to robust internal vector index.
     """
     docs = load_documents_from_db(username)
     if not docs:
@@ -117,7 +136,6 @@ def build_vector_store(username: str, force_rebuild: bool = False):
     chunks = split_documents(docs)
     logger.info(f"Indexing {len(chunks)} document chunks for user '{username}'...")
 
-    # Build hybrid vector index containing text, source, page, tokens
     index_data = {
         "chunks": [c.page_content for c in chunks],
         "metadatas": [c.metadata for c in chunks],
@@ -125,7 +143,6 @@ def build_vector_store(username: str, force_rebuild: bool = False):
         "pages": [c.metadata.get("page", 1) for c in chunks],
     }
 
-    # Save to PostgreSQL storage
     from db_storage import save_tfidf_index
     save_tfidf_index(username, json.dumps(index_data, ensure_ascii=False))
     return index_data
@@ -133,8 +150,7 @@ def build_vector_store(username: str, force_rebuild: bool = False):
 
 def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
     """
-    Performs semantic keyword vector retrieval and returns top_k relevant chunk hits
-    along with confidence score (0-100%).
+    Performs semantic keyword vector retrieval and returns top_k relevant chunk hits.
     """
     from db_storage import load_tfidf_index
     raw = load_tfidf_index(username)
@@ -143,12 +159,11 @@ def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
 
     index = json.loads(raw)
     chunks = index.get("chunks", [])
-    metadatas = index.get("metadatas", [])
     sources = index.get("sources", [])
     pages = index.get("pages", [])
 
     q_words = set(re.findall(r"[a-z0-9]+", query.lower()))
-    stop_words = {"the", "is", "in", "at", "of", "on", "and", "a", "to", "for", "with", "what", "which", "are", "how"}
+    stop_words = {"the", "is", "in", "at", "of", "on", "and", "a", "to", "for", "with", "what", "which", "are", "how", "give", "tell", "show"}
     q_keywords = [w for w in q_words if w not in stop_words and len(w) > 2]
 
     scored = []
@@ -157,10 +172,9 @@ def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
         score = 0.0
         for kw in q_keywords:
             if kw in t_lower:
-                score += 1.0 + (0.5 if f" {kw} " in t_lower else 0.0)
-        
+                score += 1.5 + (0.5 if f" {kw} " in t_lower else 0.0)
+
         if score > 0:
-            # Normalize confidence score
             conf = min(98.0, round((score / (len(q_keywords) + 0.1)) * 100, 1))
             scored.append({
                 "text": text,
@@ -179,7 +193,7 @@ def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
 def ask_knowledge_agent(username: str, query: str) -> dict:
     """
     Queries the Knowledge Base using RAG + Gemini 2.5 Flash.
-    Strictly follows anti-hallucination rules.
+    Strictly follows anti-hallucination rules and formats output cleanly.
     """
     from db_storage import list_knowledge_files
 
@@ -194,10 +208,8 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
             "error": "no_documents"
         }
 
-    # Ensure index exists
     hits = query_rag_index(username, query)
     if not hits:
-        # Rebuild index and try once more
         try:
             build_vector_store(username, force_rebuild=True)
             hits = query_rag_index(username, query)
@@ -213,7 +225,6 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
             "citations": []
         }
 
-    # Build context string with source & page metadata
     context_blocks = []
     sources_used = set()
     pages_used = set()
@@ -230,21 +241,20 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
     context_str = "\n\n".join(context_blocks)
     avg_confidence = round(sum(h["confidence"] for h in hits) / len(hits), 1)
 
-    # Prompt Gemini 2.5 Flash with strict RAG anti-hallucination constraints
     prompt = (
-        f"You are the senior NAAC Knowledge & Policy Agent for DeptOps AI.\n"
-        f"Your task is to answer the HOD's question strictly based ONLY on the provided document context below.\n\n"
+        f"You are the senior NAAC Knowledge & Policy AI Agent for DeptOps AI.\n"
+        f"Answer the user's specific question strictly based ONLY on the provided document context below.\n"
+        f"Do NOT invent details. Do NOT output raw symbols or bullet character spam.\n\n"
         f"CRITICAL RULE:\n"
-        f"If the context DOES NOT contain the answer to the question, respond EXACTLY with:\n"
-        f"\"The uploaded documents do not contain this information.\"\n"
-        f"Do not guess, assume, or invent details.\n\n"
+        f"If the context DOES NOT contain enough information to answer the question, respond EXACTLY with:\n"
+        f"\"The uploaded documents do not contain this information.\"\n\n"
         f"Document Context:\n{context_str}\n\n"
         f"User Question: {query}\n\n"
-        f"Format your response as:\n"
-        f"**Answer:** <detailed answer with citations like [1], [2]>\n"
-        f"**Relevant Key Points:**\n"
-        f"- Bullet point summary\n\n"
-        f"**NAAC Criterion Relevance:** <Mention if relevant to NAAC Criterion 1 to 7>"
+        f"Formatting Instructions:\n"
+        f"1. Provide a direct, well-written answer formatted in clear Markdown.\n"
+        f"2. Use bullet points (- ) and bold (**key terms**) for readability.\n"
+        f"3. Add inline citations like [1], [2] referencing the source chunks.\n"
+        f"4. If applicable, mention NAAC Criterion relevance (Criterion 1 to 7)."
     )
 
     try:
@@ -253,7 +263,8 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
         ans_text = res.content if hasattr(res, "content") else str(res)
     except Exception as exc:
         logger.error(f"Gemini LLM RAG call failed: {exc}")
-        ans_text = f"**Answer based on `{list(sources_used)[0]}`:**\n\n{hits[0]['text']}"
+        clean_excerpt = _clean_text(hits[0]['text'])[:500]
+        ans_text = f"**Information from `{hits[0]['source']}`:**\n\n{clean_excerpt}"
 
     return {
         "answer": ans_text,

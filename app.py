@@ -447,6 +447,21 @@ elif st.session_state.nav_page == "analytics":
                 st.download_button("📥 Download NAAC PDF Report", data=pdf_bytes, file_name=f"{sel_ds}_NAAC_report.pdf",
                                    mime="application/pdf", use_container_width=True)
 
+        if len(all_ds) >= 2:
+            st.divider()
+            st.markdown("### ⚖️ Compare Two Academic Datasets")
+            col_ds1, col_ds2 = st.columns(2)
+            with col_ds1:
+                ds1 = st.selectbox("Select Primary Dataset", all_ds, key="cmp_ds1")
+            with col_ds2:
+                ds2 = st.selectbox("Select Comparison Dataset", [d for d in all_ds if d != ds1], key="cmp_ds2")
+            if st.button("Compare Datasets ⚖️", key="go_ds_cmp", type="primary"):
+                with st.spinner(f"Comparing `{ds1}` vs `{ds2}`..."):
+                    from agents.analytics_agent import compare_datasets
+                    cmp_res = compare_datasets(username, ds1, ds2)
+                with st.container(border=True):
+                    st.markdown(cmp_res)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PAGE 3: DEDICATED KNOWLEDGE AGENT
@@ -482,34 +497,14 @@ elif st.session_state.nav_page == "knowledge":
                 st.success(f"🎯 **RAG Confidence Score:** {kb_res['confidence_score']}%")
 
     st.divider()
-    st.markdown("### 🎓 NAAC Preparation Tools")
-
-    t1, t2 = st.tabs(["📜 NAAC Criterion Summarizer", "📑 Compare Two Documents"])
-    with t1:
-        c_num = st.selectbox("Select NAAC Criterion", list(range(1, 8)), format_func=lambda x: f"Criterion {x}")
-        if st.button("Generate Criterion Summary 📝", key="go_crit_sum"):
-            with st.spinner(f"Generating summary for Criterion {c_num}..."):
-                from agents.knowledge_agent import generate_criterion_summary
-                crit_text = generate_criterion_summary(username, c_num)
-            with st.container(border=True):
-                st.markdown(crit_text)
-
-    with t2:
-        if len(docs) >= 2:
-            col_d1, col_d2 = st.columns(2)
-            with col_d1:
-                d1 = st.selectbox("Select Document 1", docs, key="cmp_d1")
-            with col_d2:
-                d2 = st.selectbox("Select Document 2", [d for d in docs if d != d1], key="cmp_d2")
-
-            if st.button("Compare & Find Differences ⚖️", key="go_doc_cmp"):
-                with st.spinner(f"Comparing `{d1}` vs `{d2}`..."):
-                    from agents.knowledge_agent import compare_documents
-                    cmp_res = compare_documents(username, d1, d2)
-                with st.container(border=True):
-                    st.markdown(cmp_res)
-        else:
-            st.info("Upload at least 2 documents to use the document comparison tool.")
+    st.markdown("### 📜 NAAC Criterion Summarizer")
+    c_num = st.selectbox("Select NAAC Criterion to Summarize", list(range(1, 8)), format_func=lambda x: f"Criterion {x}")
+    if st.button("Generate Criterion Summary 📝", key="go_crit_sum", type="primary"):
+        with st.spinner(f"Generating summary for Criterion {c_num}..."):
+            from agents.knowledge_agent import generate_criterion_summary
+            crit_text = generate_criterion_summary(username, c_num)
+        with st.container(border=True):
+            st.markdown(crit_text)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
