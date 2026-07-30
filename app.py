@@ -353,7 +353,7 @@ if st.session_state.nav_page == "coordinator":
         <span style="font-size:0.75rem; font-weight:700; background:rgba(255,255,255,0.25); padding:4px 12px; border-radius:12px;">Central Intelligence Engine</span>
         <h1>🎓 DeptOps AI Coordinator</h1>
         <p>AI Assistant for NAAC Department Inspection Preparation.<br>
-        Ask questions, upload files, or paste website URLs — Coordinator automatically invokes the right specialist agent.</p>
+        Upload files in the sidebar or paste website URLs — Coordinator automatically invokes the right specialist agent.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -379,75 +379,6 @@ if st.session_state.nav_page == "coordinator":
         st.session_state.web_page_result = web_res
         st.session_state.nav_page = "website"
         st.rerun()
-
-    # Query Input Box
-    with st.container(border=True):
-        st.markdown("### 💬 Ask Coordinator")
-        coord_query = st.text_area("Ask any query, dataset question, or NAAC policy request:", height=100, key="coord_q",
-                                   placeholder="Examples:\n• Compare placement statistics across recent years\n• What is the attendance requirement for exam eligibility according to regulations?\n• Audit department website https://cs.university.edu")
-
-        c_ds, c_btn = st.columns([3, 1])
-        with c_ds:
-            all_ds = get_datasets(username)
-            chosen_ds = st.selectbox("📂 Target Dataset (Optional)", ["Auto"] + all_ds, key="coord_ds")
-            target_ds_file = None if chosen_ds == "Auto" else chosen_ds
-        with c_btn:
-            st.markdown("<br>", unsafe_allow_html=True)
-            submit_coord = st.button("Ask Assistant 🚀", type="primary", use_container_width=True, key="coord_go")
-
-    if submit_coord and coord_query.strip():
-        with st.spinner("Coordinator routing to specialist agent..."):
-            from agents.coordinator_agent import process_query
-            res = process_query(username=username, query=coord_query.strip(), file_path=target_ds_file)
-            st.session_state.last_coord_result = res
-
-    # Render Results
-    if "last_coord_result" in st.session_state:
-        res_data = st.session_state.last_coord_result
-        intent = res_data.get("intent", "coordinator")
-        result = res_data.get("result", {})
-
-        bmap = {
-            "analytics": ("b-ana", "📊 Analytics Agent"),
-            "knowledge": ("b-know", "📚 Knowledge Agent"),
-            "website": ("b-web", "🌐 Website Testing Agent")
-        }
-        bcls, blabel = bmap.get(intent, ("b-know", "🤖 Agent"))
-        st.markdown(f'<span class="badge {bcls}">{blabel}</span>', unsafe_allow_html=True)
-
-        with st.expander("🛠️ Live Agent Execution Logs", expanded=False):
-            st.code(f"Routed Query: {res_data.get('query')}\nIntent Category: {intent}\nTarget Asset: {res_data.get('file_path') or res_data.get('url') or 'N/A'}\nStatus: SUCCESS", language="yaml")
-
-        if intent == "analytics":
-            with st.container(border=True):
-                st.markdown(result.get("answer", "No response generated."))
-            charts = result.get("charts", [])
-            if charts:
-                st.markdown("#### 📊 Recommended Visualizations")
-                c1, c2 = st.columns(2)
-                for i, c in enumerate(charts[:4]):
-                    with (c1 if i % 2 == 0 else c2):
-                        st.plotly_chart(c["fig"], use_container_width=True)
-
-        elif intent == "knowledge":
-            with st.container(border=True):
-                st.markdown(result.get("answer", "No response generated."))
-            if result.get("citations"):
-                st.caption("📎 Relevant Citations: " + " | ".join(result["citations"]))
-            if result.get("confidence_score"):
-                st.caption(f"🎯 Confidence Score: **{result['confidence_score']}%**")
-
-        elif intent == "website":
-            scores = result.get("scores", {})
-            if scores:
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("Overall Health", f"{scores.get('overall',0)}/100")
-                c2.metric("Performance", f"{scores.get('performance',0)}/100")
-                c3.metric("SEO", f"{scores.get('seo',0)}/100")
-                c4.metric("Accessibility", f"{scores.get('accessibility',0)}/100")
-                c5.metric("Security", f"{scores.get('security',0)}/100")
-            with st.container(border=True):
-                st.markdown(result.get("ai_report", "No report generated."))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

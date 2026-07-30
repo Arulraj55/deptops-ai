@@ -50,11 +50,11 @@ def save_analytics_file(username: str, filename: str, content: bytes) -> None:
 
 
 def list_analytics_files(username: str) -> list[dict]:
-    """Return list of {filename, uploaded_at} for this user, sorted by name."""
+    """Return list of {filename, uploaded_at} for this user, sorted by most recently uploaded first."""
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
-                "SELECT filename, uploaded_at FROM analytics_files WHERE username = %s ORDER BY filename",
+                "SELECT filename, uploaded_at FROM analytics_files WHERE username = %s ORDER BY uploaded_at DESC, id DESC",
                 (username,),
             )
             rows = cur.fetchall()

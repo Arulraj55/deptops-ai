@@ -33,7 +33,10 @@ def _load_dataframe(username: str, filename: str) -> pd.DataFrame:
         raise FileNotFoundError(f"File '{filename}' not found in database.")
     buf = io.BytesIO(content)
     ext = Path(filename).suffix.lower()
-    return pd.read_csv(buf) if ext == ".csv" else pd.read_excel(buf)
+    df = pd.read_csv(buf) if ext == ".csv" else pd.read_excel(buf)
+    # Normalize column names — strip whitespace to prevent KeyError mismatches
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 
 # ── Column Type Detector ──────────────────────────────────────────────────────
@@ -295,28 +298,47 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
     col_info = stats["col_types"]
     charts = generate_visualizations(df, col_info)
 
-    # Build rich prompt for Gemini 2.5 Flash
-    context_str = f"Dataset: {target_file}\nRows: {len(df)}, Columns: {list(df.columns)}\n\n"
+    # Build rich prompt for Gemini with full data context for accuracy
+    data_preview = df.head(50).to_string(index=False)
+    context_str = (
+        f"Dataset: {target_file}\n"
+        f"Total Rows: {len(df)}, Total Columns: {len(df.columns)}\n"
+        f"Column Names: {list(df.columns)}\n\n"
+    )
     if "highest_lowest" in stats:
-        context_str += f"Key Numeric Metrics (Min/Max/Mean/Std):\n{stats['highest_lowest']}\n\n"
+        context_str += "Key Numeric Metrics (Min/Max/Mean/Std):\n"
+        for col_name, vals in stats["highest_lowest"].items():
+            context_str += f"  - {col_name}: Mean={vals['mean']}, Max={vals['max']}, Min={vals['min']}, StdDev={vals['std']}\n"
+        context_str += "\n"
+    if "cat_summary" in stats:
+        context_str += "Categorical Column Value Counts:\n"
+        for col_name, counts in stats["cat_summary"].items():
+            context_str += f"  - {col_name}: {counts}\n"
+        context_str += "\n"
     if "year_improvements" in stats:
-        context_str += f"Year-over-Year Percentage Improvements:\n{stats['year_improvements']}\n\n"
-    if "anomalies" in stats:
-        context_str += f"Detected Anomalies/Outliers: {stats['anomalies']}\n\n"
-    context_str += f"Sample Data (First 5 Rows):\n{df.head(5).to_string(index=False)}"
+        context_str += "Year-over-Year Percentage Changes:\n"
+        for col_name, vals in stats["year_improvements"].items():
+            context_str += f"  - {col_name}: {vals['change_pct']}% ({vals['from_year']} → {vals['to_year']})\n"
+        context_str += "\n"
+    if "anomalies" in stats and stats["anomalies"]:
+        context_str += f"Detected Outliers: {stats['anomalies']}\n\n"
+    context_str += f"Data (up to 50 rows):\n{data_preview}"
 
     answer = ""
     try:
-        llm = get_llm(temperature=0.2)
+        llm = get_llm(temperature=0.1)
         prompt = (
-            f"You are the senior NAAC Accreditation & Academic Analytics AI Agent for DeptOps AI.\n"
-            f"Analyze the following dataset context and answer the HOD's question accurately.\n\n"
-            f"Data Context:\n{context_str}\n\n"
+            f"You are the NAAC Academic Analytics AI Agent for DeptOps AI.\n"
+            f"You MUST answer ONLY using the actual data provided below. Do NOT guess, invent, or hallucinate numbers.\n"
+            f"If the data does not contain enough information to answer, say so clearly.\n\n"
+            f"--- DATA CONTEXT ---\n{context_str}\n--- END DATA ---\n\n"
             f"User Question: {query}\n\n"
-            f"Provide:\n"
-            f"1. Direct, clear answer with exact numbers and percentage comparisons.\n"
-            f"2. Key trends, anomalies, highest/lowest highlights.\n"
-            f"3. Actionable departmental recommendations for NAAC accreditation review."
+            f"Instructions for your response:\n"
+            f"1. Answer with EXACT numbers from the data. Use tables where appropriate.\n"
+            f"2. Format your response in clean Markdown with headers (##), bullet points, bold for key numbers, and tables.\n"
+            f"3. Highlight key findings: highest, lowest, trends, and any anomalies.\n"
+            f"4. End with 2-3 concise NAAC-relevant recommendations based on the data.\n"
+            f"5. Keep the response well-structured and professional."
         )
         res = invoke_llm_with_retry(llm, prompt)
         answer = res.content if hasattr(res, "content") else str(res)
