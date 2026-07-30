@@ -426,12 +426,17 @@ elif st.session_state.nav_page == "analytics":
 
         st.divider()
         st.markdown("### 💬 Ask Gemini Natural Language Questions")
-        nl_q = st.text_input("Ask a question about this dataset (e.g. 'Compare placements', 'Highest CGPA', 'Show research trend'):", key="ana_nl_q")
+        nl_q = st.text_input("Ask a question about this dataset (e.g. 'How many students in CSE department?', 'Highest CGPA', 'Compare placements'):", key="ana_nl_q")
         if st.button("Analyze with Gemini ⚡", type="primary", key="go_ana_nl") and nl_q.strip():
             with st.spinner("Gemini 2.5 Flash analyzing dataset..."):
                 nl_res = ask_analytics_agent(username, query=nl_q.strip(), filename=sel_ds)
+                st.session_state["ana_nl_answer"] = nl_res.get("answer", "")
+                st.session_state["ana_nl_q_last"] = nl_q.strip()
+
+        if "ana_nl_answer" in st.session_state:
+            st.markdown(f"#### 🤖 Answer to: *\"{st.session_state.get('ana_nl_q_last', '')}\"*")
             with st.container(border=True):
-                st.markdown(nl_res.get("answer", ""))
+                st.markdown(st.session_state["ana_nl_answer"])
 
         st.divider()
         st.markdown("### 📥 Download Reports & Summaries")

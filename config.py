@@ -68,19 +68,22 @@ def get_llm(temperature: float = 0.2, streaming: bool = False, max_retries: int 
 
     # OpenRouter fallback if OPENROUTER_API_KEY is present
     if OPENROUTER_API_KEY:
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=OPENROUTER_MODEL,
-            openai_api_key=OPENROUTER_API_KEY,
-            openai_api_base=OPENROUTER_BASE_URL,
-            temperature=temperature,
-            timeout=timeout,
-            streaming=streaming,
-            default_headers={
-                "HTTP-Referer": "https://deptops-ai.onrender.com",
-                "X-Title": "DeptOps AI",
-            },
-        )
+        try:
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=OPENROUTER_MODEL,
+                openai_api_key=OPENROUTER_API_KEY,
+                openai_api_base=OPENROUTER_BASE_URL,
+                temperature=temperature,
+                timeout=timeout,
+                streaming=streaming,
+                default_headers={
+                    "HTTP-Referer": "https://deptops-ai.onrender.com",
+                    "X-Title": "DeptOps AI",
+                },
+            )
+        except Exception as o_err:
+            logger.warning(f"Could not initialize ChatOpenAI for OpenRouter: {o_err}")
 
     raise ValueError(
         "GEMINI_API_KEY (or GOOGLE_API_KEY) is not set in environment variables / .env file. "

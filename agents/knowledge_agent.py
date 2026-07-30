@@ -163,8 +163,8 @@ def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
     pages = index.get("pages", [])
 
     q_words = set(re.findall(r"[a-z0-9]+", query.lower()))
-    stop_words = {"the", "is", "in", "at", "of", "on", "and", "a", "to", "for", "with", "what", "which", "are", "how", "give", "tell", "show"}
-    q_keywords = [w for w in q_words if w not in stop_words and len(w) > 2]
+    stop_words = {"the", "is", "in", "at", "of", "on", "and", "a", "to", "for", "with", "what", "which", "are", "how", "give", "tell", "show", "me", "find", "list", "get", "some", "under", "from"}
+    q_keywords = [w for w in q_words if w not in stop_words and (len(w) >= 2 or w.isdigit())]
 
     scored = []
     for idx, text in enumerate(chunks):
@@ -172,7 +172,7 @@ def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
         score = 0.0
         for kw in q_keywords:
             if kw in t_lower:
-                score += 1.5 + (0.5 if f" {kw} " in t_lower else 0.0)
+                score += 2.0 if f" {kw} " in f" {t_lower} " else 1.0
 
         if score > 0:
             conf = min(98.0, round((score / (len(q_keywords) + 0.1)) * 100, 1))
@@ -245,16 +245,17 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
         f"You are the senior NAAC Knowledge & Policy AI Agent for DeptOps AI.\n"
         f"Answer the user's specific question strictly based ONLY on the provided document context below.\n"
         f"Do NOT invent details. Do NOT output raw symbols or bullet character spam.\n\n"
-        f"CRITICAL RULE:\n"
-        f"If the context DOES NOT contain enough information to answer the question, respond EXACTLY with:\n"
+        f"CRITICAL RULES:\n"
+        f"1. Answer ONLY what the user asked. If the user asked for a specific topic (e.g. 'graphs', 'attendance') or a specific quantity (e.g. '5 questions'), extract and list ONLY items matching that topic/quantity.\n"
+        f"2. Do NOT list unrelated sections from the document (e.g. do not list arrays or dynamic programming if asked about graphs).\n"
+        f"3. If the context DOES NOT contain enough information to answer the question, respond EXACTLY with:\n"
         f"\"The uploaded documents do not contain this information.\"\n\n"
         f"Document Context:\n{context_str}\n\n"
         f"User Question: {query}\n\n"
         f"Formatting Instructions:\n"
-        f"1. Provide a direct, well-written answer formatted in clear Markdown.\n"
-        f"2. Use bullet points (- ) and bold (**key terms**) for readability.\n"
-        f"3. Add inline citations like [1], [2] referencing the source chunks.\n"
-        f"4. If applicable, mention NAAC Criterion relevance (Criterion 1 to 7)."
+        f"- Provide a clean, direct answer in Markdown.\n"
+        f"- Use numbered lists (1., 2., 3.) or clean bullet points.\n"
+        f"- Add inline citations like [1], [2] referencing the source chunks."
     )
 
     try:
@@ -277,11 +278,45 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
 
 # ── NAAC Criterion Summarizer & Document Comparison ─────────────────────────
 
+CRITERION_MAP = {
+    1: ("Curricular Aspects", "curricular curriculum syllabus revision feedback value added academic flexibility course outcomes programme outcomes"),
+    2: ("Teaching-Learning and Evaluation", "teaching learning evaluation student enrollment faculty pass percentage experiential learning ict internal assessment exam marks"),
+    3: ("Research, Innovations and Extension", "research publication journal grant project patent phd consultancy extension mou collaboration nss ncc awards"),
+    4: ("Infrastructure and Learning Resources", "infrastructure classroom laboratory lab library journal e-learning wifi computer sports campus maintenance ICT labs"),
+    5: ("Student Support and Progression", "student support scholarship financial support career counseling placement higher education alumni grievance sports cultural competitive exam"),
+    6: ("Governance, Leadership and Management", "governance leadership management vision mission e-governance faculty empowerment welfare financial audit iqac quality strategy"),
+    7: ("Institutional Values and Best Practices", "institutional values best practices gender equity solar green campus waste management inclusiveness code of conduct distinctiveness environment"),
+}
+
 def generate_criterion_summary(username: str, criterion_number: int) -> str:
-    """Generate NAAC Criterion-wise summary (Criterion 1 to 7)."""
-    query = f"Summarize information, policies, metrics, and documents related to NAAC Criterion {criterion_number}"
-    res = ask_knowledge_agent(username, query)
-    return res.get("answer", "The uploaded documents do not contain this information.")
+    """Generate NAAC Criterion-wise summary (Criterion 1 to 7) with targeted criterion search."""
+    crit_info = CRITERION_MAP.get(criterion_number, (f"Criterion {criterion_number}", "NAAC policy quality criteria"))
+    crit_name, keywords = crit_info
+    
+    query = f"NAAC Criterion {criterion_number} {crit_name} {keywords}"
+    hits = query_rag_index(username, query, top_k=6)
+    
+    if not hits:
+        return f"**NAAC Criterion {criterion_number}: {crit_name} Summary**\n\nThe uploaded documents do not contain specific information or policies related to Criterion {criterion_number} ({crit_name}). Please upload relevant policy handbooks or departmental reports."
+
+    context_str = "\n\n".join([f"--- Chunk {i+1} ({h['source']}) ---\n{h['text']}" for i, h in enumerate(hits)])
+    
+    prompt = (
+        f"You are the senior NAAC Accreditation AI Specialist.\n"
+        f"Generate a comprehensive SSR (Self-Study Report) summary for NAAC Criterion {criterion_number}: {crit_name} based on the document context below.\n\n"
+        f"Document Context:\n{context_str}\n\n"
+        f"Provide:\n"
+        f"1. Executive Summary for Criterion {criterion_number}: {crit_name}.\n"
+        f"2. Key Metrics, Policies & Evidence found in the documents.\n"
+        f"3. Actionable NAAC SSR Documentation Recommendations."
+    )
+
+    try:
+        llm = get_llm(temperature=0.1)
+        res = invoke_llm_with_retry(llm, prompt)
+        return res.content if hasattr(res, "content") else str(res)
+    except Exception as exc:
+        return f"**Criterion {criterion_number} Summary:**\n\n" + "\n\n".join([h['text'][:300] for h in hits[:2]])
 
 
 def compare_documents(username: str, doc1: str, doc2: str) -> str:
