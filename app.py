@@ -427,7 +427,7 @@ elif st.session_state.nav_page == "analytics":
         st.markdown("### 💬 Ask OpenRouter AI Natural Language Questions")
         nl_q = st.text_input("Ask a question about this dataset (e.g. 'How many students in CSE department?', 'Highest CGPA', 'Compare placements'):", key="ana_nl_q")
         if st.button("Analyze with OpenRouter AI ⚡", type="primary", key="go_ana_nl") and nl_q.strip():
-            with st.spinner("OpenRouter free-model panel analyzing dataset..."):
+            with st.spinner("OpenRouter free model analyzing dataset..."):
                 nl_res = ask_analytics_agent(username, query=nl_q.strip(), filename=sel_ds)
                 st.session_state["ana_nl_answer"] = nl_res.get("answer", "")
                 st.session_state["ana_nl_q_last"] = nl_q.strip()

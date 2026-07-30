@@ -261,7 +261,7 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
     try:
         ans_text = invoke_openrouter_free_models(prompt, temperature=0.1)
     except Exception as exc:
-        logger.error(f"OpenRouter free-model RAG panel failed: {exc}")
+        logger.error(f"OpenRouter free-model RAG fallback failed: {exc}")
         # Smart fallback: extract topic-specific lines from retrieved chunks
         q_lower = query.lower()
         # Extract meaningful topic keywords from query

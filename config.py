@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable
 
 import requests
@@ -43,11 +42,9 @@ OPENROUTER_FREE_MODELS: tuple[str, ...] = (
     "nousresearch/deephermes-3-llama-3-8b-preview:free",
 )
 
-# Calling every free model can be slow and can exhaust free daily limits.
-# This is still config-owned, so changing the fan-out does not require .env.
+# Try free models in this config/discovery order. The first successful answer is used.
 OPENROUTER_MAX_FREE_MODELS: int = 25
 OPENROUTER_MODEL_DISCOVERY_TIMEOUT: int = 10
-OPENROUTER_PANEL_WORKERS: int = 4
 
 # Database
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
@@ -156,7 +153,7 @@ def get_openrouter_free_llms(
 def get_llm(temperature: float = 0.2, streaming: bool = False, max_retries: int = 3, timeout: int = 60):
     """
     Backwards-compatible single-model helper for older call sites.
-    Prefer invoke_openrouter_free_models for AI answers so multiple free models are called.
+    Prefer invoke_openrouter_free_models for AI answers so free models are tried in order.
     """
     del max_retries
     return get_openrouter_free_llms(temperature=temperature, streaming=streaming, timeout=timeout, limit=1)[0]
@@ -197,46 +194,26 @@ def invoke_openrouter_free_models(
     limit: int = OPENROUTER_MAX_FREE_MODELS,
 ) -> str:
     """
-    Fan out one prompt to the configured/current OpenRouter free models and return
-    a compact panel answer. At least one model must succeed.
+    Try OpenRouter free models in order and return the first successful answer.
+    This keeps all model choices in config/discovery without calling every model.
     """
     llms = get_openrouter_free_llms(temperature=temperature, timeout=timeout, limit=limit)
-    successful: list[tuple[str, str]] = []
     failures: list[tuple[str, str]] = []
 
-    def call_model(llm):
+    for llm in llms:
         model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "openrouter/free")
-        res = invoke_llm_with_retry(llm, prompt_input, retries=retries)
-        content = res.content if hasattr(res, "content") else str(res)
-        return model_name, content.strip()
+        try:
+            logger.info("Trying OpenRouter free model: %s", model_name)
+            res = invoke_llm_with_retry(llm, prompt_input, retries=retries)
+            content = res.content if hasattr(res, "content") else str(res)
+            content = content.strip()
+            if content:
+                logger.info("OpenRouter free model answered: %s", model_name)
+                return content
+            failures.append((model_name, "empty response"))
+        except Exception as exc:
+            failures.append((model_name, str(exc)[:180]))
+            logger.warning("OpenRouter free model failed (%s): %s", model_name, exc)
 
-    worker_count = max(1, min(OPENROUTER_PANEL_WORKERS, len(llms)))
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        future_map = {executor.submit(call_model, llm): llm for llm in llms}
-        for future in as_completed(future_map):
-            llm = future_map[future]
-            model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "openrouter/free")
-            try:
-                name, content = future.result()
-                if content:
-                    successful.append((name, content))
-            except Exception as exc:
-                failures.append((model_name, str(exc)[:180]))
-                logger.warning("OpenRouter free model failed (%s): %s", model_name, exc)
-
-    if not successful:
-        failure_text = "; ".join(f"{model}: {err}" for model, err in failures[:5])
-        raise RuntimeError(f"All OpenRouter free model calls failed. {failure_text}")
-
-    if len(successful) == 1:
-        return successful[0][1]
-
-    panel = ["## OpenRouter Free AI Panel\n"]
-    for model_name, content in successful:
-        panel.append(f"### {model_name}\n{content}")
-    if failures:
-        panel.append(
-            "\n> Some free OpenRouter models were unavailable or rate-limited: "
-            + ", ".join(model for model, _ in failures[:8])
-        )
-    return "\n\n".join(panel)
+    failure_text = "; ".join(f"{model}: {err}" for model, err in failures[:5])
+    raise RuntimeError(f"All OpenRouter free model attempts failed. {failure_text}")

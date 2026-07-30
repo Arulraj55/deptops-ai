@@ -34,9 +34,9 @@ copy .env.example .env
 DeptOps AI uses OpenRouter only. Add `OPENROUTER_API_KEY` to `.env`.
 Model selection lives in `config.py`, not `.env`.
 
-The app discovers the current zero-cost OpenRouter models at runtime and fans
-prompts out to a free-model panel. If discovery is unavailable, it falls back to
-the `OPENROUTER_FREE_MODELS` list in `config.py`.
+The app discovers the current zero-cost OpenRouter models at runtime, tries them
+in order, and uses the first successful answer. If discovery is unavailable, it
+falls back to the `OPENROUTER_FREE_MODELS` list in `config.py`.
 
 ### 3. Generate sample data (optional)
 

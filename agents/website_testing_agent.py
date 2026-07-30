@@ -315,7 +315,7 @@ def generate_ai_website_report(summary: dict) -> str:
     try:
         return invoke_openrouter_free_models(prompt, temperature=0.2)
     except Exception as exc:
-        logger.error(f"OpenRouter free-model panel failed for Website Testing Agent: {exc}")
+        logger.error(f"OpenRouter free-model fallback failed for Website Testing Agent: {exc}")
         return (
             f"### 🌐 Website Audit Report — `{url}`\n\n"
             f"**Overall Health Score:** {scores['overall']}/100\n"

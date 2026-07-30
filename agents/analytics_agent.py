@@ -8,7 +8,7 @@ Capabilities:
 - Automatic chart generator (Bar, Line, Pie, Histogram, Box Plot, Scatter, Heatmap, Correlation, Trend, Comparison).
 - Automatic selection of optimal chart based on dataset dimensions.
 - Comprehensive statistical summary, anomaly detection, year comparisons, percentage improvements.
-- Powered by an OpenRouter free-model panel for natural language Q&A and chart explanations.
+- Powered by OpenRouter free-model fallback for natural language Q&A and chart explanations.
 - Export support: Excel Summary, PDF Report, PNG Chart rendering.
 """
 
@@ -395,7 +395,7 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
         )
         answer = invoke_openrouter_free_models(prompt, temperature=0.1)
     except Exception as exc:
-        logger.error(f"OpenRouter free-model panel failed for Analytics Agent: {exc}")
+        logger.error(f"OpenRouter free-model fallback failed for Analytics Agent: {exc}")
         # Build a smart, question-aware fallback from actual stats
         answer = f"## 📊 Data Analysis for `{target_file}`\n\n"
 
