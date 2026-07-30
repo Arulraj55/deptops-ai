@@ -315,6 +315,42 @@ CRITERION_MAP = {
     7: ("Institutional Values and Best Practices", "institutional values best practices gender equity solar green campus waste management inclusiveness code of conduct distinctiveness environment"),
 }
 
+
+def _criterion_not_found_message(criterion_number: int, crit_name: str) -> str:
+    return (
+        f"**NAAC Criterion {criterion_number}: {crit_name} Summary**\n\n"
+        f"The uploaded documents do not contain enough relevant evidence for "
+        f"NAAC Criterion {criterion_number} ({crit_name}). Please upload SSR notes, "
+        f"NAAC criterion files, policy documents, placement records, scholarship "
+        f"records, alumni records, or other department evidence for this criterion."
+    )
+
+
+def _filter_criterion_hits(hits: list[dict], crit_name: str, keywords: str) -> list[dict]:
+    criterion_words = {
+        w
+        for w in re.findall(r"[a-z]+", f"{crit_name} {keywords}".lower())
+        if len(w) > 3 and w not in {"criterion", "criteria", "naac", "with", "and", "from"}
+    }
+    context_words = {
+        "naac", "ssr", "iqac", "accreditation", "evidence", "policy",
+        "department", "institution", "student", "students", "alumni",
+        "placement", "scholarship", "progression", "support",
+    }
+
+    relevant_hits = []
+    for hit in hits:
+        text = hit.get("text", "")
+        text_lower = text.lower()
+        matched = {word for word in criterion_words if word in text_lower}
+        has_context = any(word in text_lower for word in context_words)
+
+        if len(matched) >= 2 or (has_context and matched):
+            relevant_hits.append(hit)
+
+    return relevant_hits
+
+
 def generate_criterion_summary(username: str, criterion_number: int) -> str:
     """Generate NAAC Criterion-wise summary (Criterion 1 to 7) with targeted criterion search."""
     crit_info = CRITERION_MAP.get(criterion_number, (f"Criterion {criterion_number}", "NAAC policy quality criteria"))
@@ -322,15 +358,19 @@ def generate_criterion_summary(username: str, criterion_number: int) -> str:
     
     query = f"NAAC Criterion {criterion_number} {crit_name} {keywords}"
     hits = query_rag_index(username, query, top_k=6)
+    hits = _filter_criterion_hits(hits, crit_name, keywords)
     
     if not hits:
-        return f"**NAAC Criterion {criterion_number}: {crit_name} Summary**\n\nThe uploaded documents do not contain specific information or policies related to Criterion {criterion_number} ({crit_name}). Please upload relevant policy handbooks or departmental reports."
+        return _criterion_not_found_message(criterion_number, crit_name)
 
     context_str = "\n\n".join([f"--- Chunk {i+1} ({h['source']}) ---\n{h['text']}" for i, h in enumerate(hits)])
     
     prompt = (
         f"You are the senior NAAC Accreditation AI Specialist.\n"
         f"Generate a comprehensive SSR (Self-Study Report) summary for NAAC Criterion {criterion_number}: {crit_name} based on the document context below.\n\n"
+        f"If the context is unrelated to NAAC Criterion {criterion_number}, respond only with: "
+        f"\"The uploaded documents do not contain enough relevant evidence for NAAC Criterion {criterion_number}.\"\n"
+        f"Do not summarize aptitude formulas, algebra notes, random syllabus content, or unrelated text as criterion evidence.\n\n"
         f"Document Context:\n{context_str}\n\n"
         f"Provide:\n"
         f"1. Executive Summary for Criterion {criterion_number}: {crit_name}.\n"
@@ -341,7 +381,16 @@ def generate_criterion_summary(username: str, criterion_number: int) -> str:
     try:
         return invoke_openrouter_free_models(prompt, temperature=0.1)
     except Exception as exc:
-        return f"**Criterion {criterion_number} Summary:**\n\n" + "\n\n".join([h['text'][:300] for h in hits[:2]])
+        logger.error(f"OpenRouter free-model criterion fallback failed: {exc}")
+        evidence_rows = []
+        for idx, hit in enumerate(hits[:5], 1):
+            excerpt = _clean_text(hit.get("text", ""))[:220]
+            evidence_rows.append(f"{idx}. `{hit.get('source', 'Unknown')}` page {hit.get('page', 1)}: {excerpt}")
+        return (
+            f"**NAAC Criterion {criterion_number}: {crit_name} Evidence Found**\n\n"
+            f"OpenRouter AI is currently unavailable, but these relevant evidence snippets were found:\n\n"
+            + "\n".join(evidence_rows)
+        )
 
 
 def compare_documents(username: str, doc1: str, doc2: str) -> str:

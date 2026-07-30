@@ -24,6 +24,13 @@ from config import invoke_openrouter_free_models
 logger = logging.getLogger("AnalyticsAgent")
 
 
+def _openrouter_fallback_note(exc: Exception, fallback_kind: str) -> str:
+    reason = str(exc)
+    if "free daily model limit" in reason.lower():
+        reason = "OpenRouter free daily model limit is exhausted for this API key."
+    return f"\n> ⚠️ *{reason} Showing {fallback_kind} from your data.*"
+
+
 # ── File loading & discovery ──────────────────────────────────────────────────
 
 def _load_dataframe(username: str, filename: str) -> pd.DataFrame:
@@ -434,7 +441,7 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
                     answer += f"| **{col}** | {vals['mean']} | {vals['max']} | {vals['min']} |\n"
                 answer += "\n"
 
-        answer += "\n> ⚠️ *AI analysis is temporarily unavailable. Showing statistical summary from your data.*"
+        answer += _openrouter_fallback_note(exc, "statistical summary")
 
     return {
         "answer": answer,
@@ -513,7 +520,7 @@ def compare_datasets(username: str, ds1: str, ds2: str) -> str:
                 report += f"| **{v}** | {c1} | {c2} |\n"
             report += "\n"
 
-        report += "\n> ⚠️ *AI analysis is temporarily unavailable. Showing statistical comparison from your data.*"
+        report += _openrouter_fallback_note(exc, "statistical comparison")
         return report
 
 

@@ -20,6 +20,11 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("DeptOpsAI")
 
+
+class OpenRouterFreeDailyLimitError(RuntimeError):
+    """Raised when OpenRouter reports the account-level free-model daily limit is exhausted."""
+
+
 # OpenRouter credentials and endpoint. Models are intentionally not read from .env.
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
@@ -57,6 +62,7 @@ DOCUMENTS_DIR: str = os.getenv("DOCUMENTS_DIR", "./data/documents")
 
 def _openrouter_headers() -> dict[str, str]:
     headers = {
+        "Content-Type": "application/json",
         "HTTP-Referer": "https://deptops-ai.onrender.com",
         "X-Title": "DeptOps AI",
     }
@@ -159,6 +165,60 @@ def get_llm(temperature: float = 0.2, streaming: bool = False, max_retries: int 
     return get_openrouter_free_llms(temperature=temperature, streaming=streaming, timeout=timeout, limit=1)[0]
 
 
+def _prompt_to_messages(prompt_input) -> list[dict[str, str]]:
+    if isinstance(prompt_input, str):
+        return [{"role": "user", "content": prompt_input}]
+    if isinstance(prompt_input, list):
+        return prompt_input
+    if hasattr(prompt_input, "to_messages"):
+        messages = []
+        for msg in prompt_input.to_messages():
+            role = getattr(msg, "type", "user")
+            if role == "human":
+                role = "user"
+            elif role == "ai":
+                role = "assistant"
+            messages.append({"role": role, "content": str(getattr(msg, "content", msg))})
+        return messages
+    return [{"role": "user", "content": str(prompt_input)}]
+
+
+def _invoke_openrouter_chat_completion(
+    model_name: str,
+    prompt_input,
+    temperature: float,
+    timeout: int,
+) -> str:
+    response = requests.post(
+        f"{OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
+        headers=_openrouter_headers(),
+        json={
+            "model": model_name,
+            "messages": _prompt_to_messages(prompt_input),
+            "temperature": temperature,
+        },
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        if response.status_code == 429 and "free-models-per-day" in response.text:
+            raise OpenRouterFreeDailyLimitError(
+                "OpenRouter free daily model limit is exhausted for this API key. "
+                "Wait for the daily reset or add credits in OpenRouter to unlock more free-model requests."
+            )
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
+
+    payload = response.json()
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"No choices returned: {str(payload)[:500]}")
+
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+    return str(content or "").strip()
+
+
 def invoke_llm_with_retry(llm, prompt_input, retries: int = 3, delay: float = 2.0):
     """
     Invoke one LLM with retry handling for rate limits and transient OpenRouter/provider errors.
@@ -197,23 +257,50 @@ def invoke_openrouter_free_models(
     Try OpenRouter free models in order and return the first successful answer.
     This keeps all model choices in config/discovery without calling every model.
     """
-    llms = get_openrouter_free_llms(temperature=temperature, timeout=timeout, limit=limit)
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY is not configured. DeptOps AI uses OpenRouter only.")
+
+    model_names = discover_openrouter_free_models(limit=limit)
     failures: list[tuple[str, str]] = []
 
-    for llm in llms:
-        model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "openrouter/free")
-        try:
-            logger.info("Trying OpenRouter free model: %s", model_name)
-            res = invoke_llm_with_retry(llm, prompt_input, retries=retries)
-            content = res.content if hasattr(res, "content") else str(res)
-            content = content.strip()
-            if content:
-                logger.info("OpenRouter free model answered: %s", model_name)
-                return content
-            failures.append((model_name, "empty response"))
-        except Exception as exc:
-            failures.append((model_name, str(exc)[:180]))
-            logger.warning("OpenRouter free model failed (%s): %s", model_name, exc)
+    for model_name in model_names:
+        delay = 1.0
+        for attempt in range(1, retries + 1):
+            try:
+                logger.info("Trying OpenRouter free model: %s", model_name)
+                content = _invoke_openrouter_chat_completion(
+                    model_name=model_name,
+                    prompt_input=prompt_input,
+                    temperature=temperature,
+                    timeout=timeout,
+                )
+                if content:
+                    logger.info("OpenRouter free model answered: %s", model_name)
+                    return content
+                failures.append((model_name, "empty response"))
+                break
+            except Exception as exc:
+                if isinstance(exc, OpenRouterFreeDailyLimitError):
+                    raise
+                err_str = str(exc).lower()
+                retryable = any(k in err_str for k in (
+                    "429", "rate", "quota", "503", "overloaded", "500",
+                    "internal", "timeout", "timed out", "deadline",
+                ))
+                if retryable and attempt < retries:
+                    logger.warning(
+                        "OpenRouter model retryable error (%s, attempt %s/%s): %s",
+                        model_name,
+                        attempt,
+                        retries,
+                        exc,
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                failures.append((model_name, str(exc)[:180]))
+                logger.warning("OpenRouter free model failed (%s): %s", model_name, exc)
+                break
 
     failure_text = "; ".join(f"{model}: {err}" for model, err in failures[:5])
     raise RuntimeError(f"All OpenRouter free model attempts failed. {failure_text}")

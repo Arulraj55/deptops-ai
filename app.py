@@ -502,13 +502,31 @@ elif st.session_state.nav_page == "knowledge":
 
     st.divider()
     st.markdown("### 📜 NAAC Criterion Summarizer")
-    c_num = st.selectbox("Select NAAC Criterion to Summarize", list(range(1, 8)), format_func=lambda x: f"Criterion {x}")
-    if st.button("Generate Criterion Summary 📝", key="go_crit_sum", type="primary"):
+    criterion_names = {
+        1: "Curricular Aspects",
+        2: "Teaching-Learning and Evaluation",
+        3: "Research, Innovations and Extension",
+        4: "Infrastructure and Learning Resources",
+        5: "Student Support and Progression",
+        6: "Governance, Leadership and Management",
+        7: "Institutional Values and Best Practices",
+    }
+    c_num = st.selectbox(
+        "Select NAAC Criterion",
+        list(criterion_names.keys()),
+        format_func=lambda x: f"Criterion {x}: {criterion_names[x]}",
+        key="criterion_select",
+    )
+    if st.button("Generate Summary 📝", key="go_crit_sum", type="primary"):
         with st.spinner(f"Generating summary for Criterion {c_num}..."):
             from agents.knowledge_agent import generate_criterion_summary
-            crit_text = generate_criterion_summary(username, c_num)
+            st.session_state["criterion_summary"] = generate_criterion_summary(username, c_num)
+            st.session_state["criterion_summary_title"] = f"Criterion {c_num}: {criterion_names[c_num]}"
+
+    if st.session_state.get("criterion_summary"):
         with st.container(border=True):
-            st.markdown(crit_text)
+            st.markdown(f"#### {st.session_state.get('criterion_summary_title', 'Criterion Summary')}")
+            st.markdown(st.session_state["criterion_summary"])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
