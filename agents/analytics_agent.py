@@ -8,7 +8,7 @@ Capabilities:
 - Automatic chart generator (Bar, Line, Pie, Histogram, Box Plot, Scatter, Heatmap, Correlation, Trend, Comparison).
 - Automatic selection of optimal chart based on dataset dimensions.
 - Comprehensive statistical summary, anomaly detection, year comparisons, percentage improvements.
-- Powered by Gemini 2.5 Flash for natural language Q&A and chart explanations.
+- Powered by an OpenRouter free-model panel for natural language Q&A and chart explanations.
 - Export support: Excel Summary, PDF Report, PNG Chart rendering.
 """
 
@@ -19,7 +19,7 @@ import numpy as np
 from pathlib import Path
 import logging
 
-from config import get_llm, invoke_llm_with_retry
+from config import invoke_openrouter_free_models
 
 logger = logging.getLogger("AnalyticsAgent")
 
@@ -328,7 +328,7 @@ def generate_visualizations(df: pd.DataFrame, col_info: dict) -> list[dict]:
     return charts
 
 
-# ── Gemini 2.5 Flash Natural Language Analysis ────────────────────────────────
+# ── OpenRouter Free-Model Natural Language Analysis ───────────────────────────
 
 def ask_analytics_agent(username: str, query: str, filename: str | None = None) -> dict:
     """
@@ -381,7 +381,6 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
 
     answer = ""
     try:
-        llm = get_llm(temperature=0.1)
         prompt = (
             f"You are the senior NAAC Academic Analytics AI Agent for DeptOps AI.\n"
             f"Answer the user's specific question accurately and directly using ONLY the dataset context provided below.\n"
@@ -394,10 +393,9 @@ def ask_analytics_agent(username: str, query: str, filename: str | None = None) 
             f"3. Structure with clean section headers (##) and bullet points.\n"
             f"4. Conclude with 2-3 specific NAAC accreditation insights based on the figures."
         )
-        res = invoke_llm_with_retry(llm, prompt)
-        answer = res.content if hasattr(res, "content") else str(res)
+        answer = invoke_openrouter_free_models(prompt, temperature=0.1)
     except Exception as exc:
-        logger.error(f"Gemini LLM call failed for Analytics Agent: {exc}")
+        logger.error(f"OpenRouter free-model panel failed for Analytics Agent: {exc}")
         # Build a smart, question-aware fallback from actual stats
         answer = f"## 📊 Data Analysis for `{target_file}`\n\n"
 
@@ -478,11 +476,9 @@ def compare_datasets(username: str, ds1: str, ds2: str) -> str:
     )
 
     try:
-        llm = get_llm(temperature=0.1)
-        res = invoke_llm_with_retry(llm, prompt)
-        return res.content if hasattr(res, "content") else str(res)
+        return invoke_openrouter_free_models(prompt, temperature=0.1)
     except Exception as exc:
-        logger.error(f"LLM comparison failed: {exc}")
+        logger.error(f"OpenRouter free-model comparison failed: {exc}")
         # Build statistical fallback comparison
         report = f"## ⚖️ Dataset Comparison: `{ds1}` vs `{ds2}`\n\n"
         report += "### Overview\n\n"
@@ -559,7 +555,7 @@ def generate_pdf_report(username: str, filename: str, answer: str, stats: dict) 
             Paragraph(f"🎓 DeptOps AI — Analytics Report", title_style),
             Paragraph(f"<b>Dataset:</b> {filename} | <b>User:</b> {username}", body_style),
             Spacer(1, 12),
-            Paragraph("<b>Executive Summary & Gemini AI Insights:</b>", styles['Heading2']),
+            Paragraph("<b>Executive Summary & OpenRouter AI Insights:</b>", styles['Heading2']),
             Spacer(1, 6),
             Paragraph(answer.replace("\n", "<br/>"), body_style),
             Spacer(1, 14),

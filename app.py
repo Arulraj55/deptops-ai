@@ -1,7 +1,7 @@
 """
 DeptOps AI — Streamlit Dashboard
 Agentic AI Assistant for NAAC Department Preparation
-Powered by Gemini 2.5 Flash
+Powered by OpenRouter free models
 """
 
 from pathlib import Path
@@ -17,7 +17,6 @@ try:
 except ImportError as e:
     raise ImportError("Plotly is required for visualizations. Install with 'pip install plotly'") from e
 
-from config import GEMINI_MODEL
 from auth import auth_gate
 import db_storage
 
@@ -425,10 +424,10 @@ elif st.session_state.nav_page == "analytics":
             st.info("No numeric columns available for visualization.")
 
         st.divider()
-        st.markdown("### 💬 Ask Gemini Natural Language Questions")
+        st.markdown("### 💬 Ask OpenRouter AI Natural Language Questions")
         nl_q = st.text_input("Ask a question about this dataset (e.g. 'How many students in CSE department?', 'Highest CGPA', 'Compare placements'):", key="ana_nl_q")
-        if st.button("Analyze with Gemini ⚡", type="primary", key="go_ana_nl") and nl_q.strip():
-            with st.spinner("Gemini 2.5 Flash analyzing dataset..."):
+        if st.button("Analyze with OpenRouter AI ⚡", type="primary", key="go_ana_nl") and nl_q.strip():
+            with st.spinner("OpenRouter free-model panel analyzing dataset..."):
                 nl_res = ask_analytics_agent(username, query=nl_q.strip(), filename=sel_ds)
                 st.session_state["ana_nl_answer"] = nl_res.get("answer", "")
                 st.session_state["ana_nl_q_last"] = nl_q.strip()
@@ -486,7 +485,7 @@ elif st.session_state.nav_page == "knowledge":
     kb_q = st.text_input("Enter question about departmental policies, regulations, or handbooks:", placeholder="e.g. What is the minimum attendance percentage to appear for end semester exams?", key="kb_page_q")
 
     if st.button("Search & Answer 🔍", type="primary", key="go_kb_q") and kb_q.strip():
-        with st.spinner("Searching document vector store with Gemini 2.5 Flash RAG..."):
+        with st.spinner("Searching document vector store with OpenRouter free-model RAG..."):
             from agents.knowledge_agent import ask_knowledge_agent
             kb_res = ask_knowledge_agent(username, kb_q.strip())
 
@@ -547,7 +546,7 @@ elif st.session_state.nav_page == "website":
         sc5.markdown(f'<div class="score-card"><div class="score-val">{scores.get("security",0)}</div><div class="score-lbl">Security</div></div>', unsafe_allow_html=True)
 
         st.divider()
-        st.markdown("### 🤖 Gemini 2.5 Flash NAAC Recommendations & Fixes")
+        st.markdown("### 🤖 OpenRouter AI NAAC Recommendations & Fixes")
         with st.container(border=True):
             st.markdown(w_res.get("ai_report", ""))
 

@@ -8,7 +8,7 @@ and routes to the appropriate specialist agent (Analytics, Knowledge, or Website
 
 import re
 import logging
-from config import get_llm, invoke_llm_with_retry
+from config import invoke_openrouter_free_models
 
 logger = logging.getLogger("CoordinatorAgent")
 
@@ -35,13 +35,12 @@ def extract_url(text: str) -> str | None:
     return match.group(0) if match else None
 
 
-def classify_intent_with_gemini(query: str) -> str:
-    """Classify user query intent into 'analytics', 'knowledge', or 'website' using Gemini 2.5 Flash."""
+def classify_intent_with_openrouter(query: str) -> str:
+    """Classify user query intent into 'analytics', 'knowledge', or 'website' using OpenRouter free models."""
     if extract_url(query):
         return "website"
 
     try:
-        llm = get_llm(temperature=0.0)
         prompt = (
             f"You are the Coordinator Intelligence Router for DeptOps AI.\n"
             f"Classify the following user input into EXACTLY ONE category:\n"
@@ -51,12 +50,17 @@ def classify_intent_with_gemini(query: str) -> str:
             f"User input: \"{query}\"\n\n"
             f"Return ONLY the single word in lowercase without quotes or extra text."
         )
-        res = invoke_llm_with_retry(llm, prompt)
-        intent = (res.content if hasattr(res, "content") else str(res)).strip().lower()
+        intent = invoke_openrouter_free_models(prompt, temperature=0.0, limit=3).strip().lower()
+        if "website" in intent:
+            return "website"
+        if "knowledge" in intent:
+            return "knowledge"
+        if "analytics" in intent:
+            return "analytics"
         if intent in ("analytics", "knowledge", "website"):
             return intent
     except Exception as exc:
-        logger.warning(f"Gemini intent classification fallback: {exc}")
+        logger.warning(f"OpenRouter intent classification fallback: {exc}")
 
     # Keyword fallback
     q_lower = query.lower()
@@ -92,7 +96,7 @@ def process_query(
 
     # 3. Prompt classification
     if not intent:
-        intent = classify_intent_with_gemini(query)
+        intent = classify_intent_with_openrouter(query)
 
     logger.info(f"Coordinator routed query '{query[:40]}' -> intent '{intent}' for user '{username}'")
 

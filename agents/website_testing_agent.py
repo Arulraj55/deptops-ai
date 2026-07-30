@@ -16,7 +16,7 @@ H. Website Structure (Navigation tree, Total pages, images, PDFs, forms)
 Generates:
 - Overall Website Health Score (0-100)
 - Category Scores (Performance, SEO, Accessibility, Security)
-- Gemini 2.5 Flash AI Recommendations
+- OpenRouter free-model AI recommendations
 - Downloadable PDF Audit Report
 """
 
@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import logging
 
-from config import get_llm, invoke_llm_with_retry
+from config import invoke_openrouter_free_models
 
 logger = logging.getLogger("WebsiteTestingAgent")
 
@@ -286,7 +286,7 @@ def run_website_audit(target_url: str) -> dict:
     return summary
 
 
-# ── AI Report & Recommendations Generator (Gemini 2.5 Flash) ─────────────────
+# ── AI Report & Recommendations Generator (OpenRouter Free Models) ────────────
 
 def generate_ai_website_report(summary: dict) -> str:
     url = summary["url"]
@@ -313,11 +313,9 @@ def generate_ai_website_report(summary: dict) -> str:
     )
 
     try:
-        llm = get_llm(temperature=0.2)
-        res = invoke_llm_with_retry(llm, prompt)
-        return res.content if hasattr(res, "content") else str(res)
+        return invoke_openrouter_free_models(prompt, temperature=0.2)
     except Exception as exc:
-        logger.error(f"Gemini LLM call failed for Website Testing Agent: {exc}")
+        logger.error(f"OpenRouter free-model panel failed for Website Testing Agent: {exc}")
         return (
             f"### 🌐 Website Audit Report — `{url}`\n\n"
             f"**Overall Health Score:** {scores['overall']}/100\n"

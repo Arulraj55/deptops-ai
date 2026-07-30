@@ -1,7 +1,7 @@
 """
 Knowledge Agent for DeptOps AI
 ------------------------------
-RAG Pipeline over Institutional Documents (PDF, DOCX, TXT, MD) using Gemini 2.5 Flash.
+RAG Pipeline over Institutional Documents (PDF, DOCX, TXT, MD) using OpenRouter free models.
 
 Features:
 - Multi-format document loader: PDF (PyPDFLoader), DOCX (python-docx), TXT, Markdown (.md).
@@ -26,7 +26,7 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
-from config import get_llm, invoke_llm_with_retry, CHROMA_PERSIST_DIR
+from config import CHROMA_PERSIST_DIR, invoke_openrouter_free_models
 
 logger = logging.getLogger("KnowledgeAgent")
 
@@ -188,11 +188,11 @@ def query_rag_index(username: str, query: str, top_k: int = 6) -> list[dict]:
     return scored[:top_k]
 
 
-# ── RAG Answer Generator powered by Gemini 2.5 Flash ──────────────────────────
+# ── RAG Answer Generator powered by OpenRouter free models ────────────────────
 
 def ask_knowledge_agent(username: str, query: str) -> dict:
     """
-    Queries the Knowledge Base using RAG + Gemini 2.5 Flash.
+    Queries the Knowledge Base using RAG + OpenRouter free models.
     Strictly follows anti-hallucination rules and formats output cleanly.
     """
     from db_storage import list_knowledge_files
@@ -259,11 +259,9 @@ def ask_knowledge_agent(username: str, query: str) -> dict:
     )
 
     try:
-        llm = get_llm(temperature=0.1)
-        res = invoke_llm_with_retry(llm, prompt)
-        ans_text = res.content if hasattr(res, "content") else str(res)
+        ans_text = invoke_openrouter_free_models(prompt, temperature=0.1)
     except Exception as exc:
-        logger.error(f"Gemini LLM RAG call failed: {exc}")
+        logger.error(f"OpenRouter free-model RAG panel failed: {exc}")
         # Smart fallback: extract topic-specific lines from retrieved chunks
         q_lower = query.lower()
         # Extract meaningful topic keywords from query
@@ -341,9 +339,7 @@ def generate_criterion_summary(username: str, criterion_number: int) -> str:
     )
 
     try:
-        llm = get_llm(temperature=0.1)
-        res = invoke_llm_with_retry(llm, prompt)
-        return res.content if hasattr(res, "content") else str(res)
+        return invoke_openrouter_free_models(prompt, temperature=0.1)
     except Exception as exc:
         return f"**Criterion {criterion_number} Summary:**\n\n" + "\n\n".join([h['text'][:300] for h in hits[:2]])
 
@@ -364,9 +360,7 @@ def compare_documents(username: str, doc1: str, doc2: str) -> str:
     )
 
     try:
-        llm = get_llm(temperature=0.2)
-        res = invoke_llm_with_retry(llm, prompt)
-        return res.content if hasattr(res, "content") else str(res)
+        return invoke_openrouter_free_models(prompt, temperature=0.2)
     except Exception as exc:
         return f"Comparison failed: {exc}"
 
