@@ -533,18 +533,18 @@ elif st.session_state.nav_page == "knowledge":
 # PAGE 4: DEDICATED WEBSITE TESTING AGENT
 # ═════════════════════════════════════════════════════════════════════════════
 elif st.session_state.nav_page == "website":
-    st.markdown('<div style="font-size:1.4rem; font-weight:800; margin-bottom:12px;">🌐 Website Testing & NAAC Audit Agent</div>', unsafe_allow_html=True)
-    st.markdown("Automated 8-Tier Website Inspection (Basic, Links, SEO, Accessibility, Performance, Security, Content, Structure).")
+    st.markdown('<div style="font-size:1.4rem; font-weight:800; margin-bottom:12px;">🌐 Real-Browser Website Diagnostic Agent</div>', unsafe_allow_html=True)
+    st.markdown("Automated Playwright Real-Browser Crawler & Failure Inspector (JS Routes, HTTP Errors, Timeouts, JS Errors, Failed API/Network Requests).")
 
     with st.container(border=True):
         w_url = st.text_input("Department Website URL", placeholder="https://cs.university.edu", key="web_page_url")
-        btn_run_web = st.button("Run Full Automated Audit 🚀", type="primary", key="go_web_audit")
+        btn_run_web = st.button("Run Real-Browser Audit 🚀", type="primary", key="go_web_audit")
 
     if btn_run_web and w_url.strip():
-        with st.spinner(f"Crawling & auditing {w_url}..."):
-            prog = st.progress(0, text="Initializing crawler...")
-            for val in range(25, 100, 25):
-                prog.progress(val, text=f"Inspecting pages and security headers... ({val}%)")
+        with st.spinner(f"Launching real headless browser & crawling reachable pages for {w_url}..."):
+            prog = st.progress(0, text="Launching Playwright Chromium browser...")
+            for val in range(20, 100, 20):
+                prog.progress(val, text=f"Discovering & inspecting JS routes and network requests... ({val}%)")
             from agents.website_testing_agent import run_website_testing_agent
             web_res = run_website_testing_agent(w_url.strip(), username=username)
             prog.progress(100, text="Audit Complete!")
@@ -555,38 +555,60 @@ elif st.session_state.nav_page == "website":
         summary = w_res.get("summary", {})
         scores = w_res.get("scores", {})
 
-        st.markdown("### 🏆 Health Scores Dashboard")
-        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-        sc1.markdown(f'<div class="score-card"><div class="score-val">{scores.get("overall",0)}</div><div class="score-lbl">Overall Health</div></div>', unsafe_allow_html=True)
-        sc2.markdown(f'<div class="score-card"><div class="score-val">{scores.get("performance",0)}</div><div class="score-lbl">Performance</div></div>', unsafe_allow_html=True)
-        sc3.markdown(f'<div class="score-card"><div class="score-val">{scores.get("seo",0)}</div><div class="score-lbl">SEO Score</div></div>', unsafe_allow_html=True)
-        sc4.markdown(f'<div class="score-card"><div class="score-val">{scores.get("accessibility",0)}</div><div class="score-lbl">Accessibility</div></div>', unsafe_allow_html=True)
-        sc5.markdown(f'<div class="score-card"><div class="score-val">{scores.get("security",0)}</div><div class="score-lbl">Security</div></div>', unsafe_allow_html=True)
+        total_found = w_res.get("total_pages_found", summary.get("total_pages_found", 0))
+        total_working = w_res.get("total_working", summary.get("total_working", 0))
+        total_broken = w_res.get("total_broken", summary.get("total_broken", 0))
+
+        st.markdown("### 🏆 Real-Browser Crawl Health Dashboard")
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.markdown(f'<div class="score-card"><div class="score-val">{total_found}</div><div class="score-lbl">Total Pages Found</div></div>', unsafe_allow_html=True)
+        sc2.markdown(f'<div class="score-card"><div class="score-val" style="color:#2e7d32;">{total_working}</div><div class="score-lbl">Working Pages 🟢</div></div>', unsafe_allow_html=True)
+        sc3.markdown(f'<div class="score-card"><div class="score-val" style="color:#c62828;">{total_broken}</div><div class="score-lbl">Broken Pages 🔴</div></div>', unsafe_allow_html=True)
+        sc4.markdown(f'<div class="score-card"><div class="score-val">{scores.get("overall",0)}%</div><div class="score-lbl">Health Score</div></div>', unsafe_allow_html=True)
 
         st.divider()
-        st.markdown("### 🤖 OpenRouter AI NAAC Recommendations & Fixes")
+
+        # Broken Pages Breakdown Section
+        st.markdown(f"### 🔴 Broken Pages & Failure Reasons ({total_broken})")
+        broken_list = w_res.get("broken_pages", summary.get("broken_pages", []))
+        if not broken_list:
+            st.success("🎉 No broken pages detected! All reachable internal pages loaded successfully without errors.")
+        else:
+            for idx, bp in enumerate(broken_list, 1):
+                with st.expander(f"❌ {idx}. {bp['url']} (HTTP {bp.get('status', 'Error')})", expanded=True):
+                    st.markdown(f"**URL:** [{bp['url']}]({bp['url']})")
+                    st.markdown(f"**Load Time:** `{bp.get('load_time_ms', '—')} ms`")
+                    st.markdown("**Failure Reasons Detected:**")
+                    for reason in bp.get("failure_reasons", []):
+                        st.markdown(f"- ⚠️ `{reason}`")
+
+        st.divider()
+
+        # Working Pages Section
+        st.markdown(f"### 🟢 Working Internal Pages ({total_working})")
+        working_list = w_res.get("working_pages", summary.get("working_pages", []))
+        if working_list:
+            work_df_data = [
+                {
+                    "Page Title": p.get("title", "Untitled"),
+                    "URL": p["url"],
+                    "Status": f"HTTP {p.get('status', 200)}",
+                    "Load Time (ms)": p.get("load_time_ms", 0),
+                    "JS Errors": p.get("js_errors_count", 0),
+                    "Failed Network Requests": p.get("failed_requests_count", 0),
+                }
+                for p in working_list
+            ]
+            st.dataframe(pd.DataFrame(work_df_data), use_container_width=True, height=220)
+
+        st.divider()
+        st.markdown("### 🤖 OpenRouter AI Recommendations & Developer Fixes")
         with st.container(border=True):
             st.markdown(w_res.get("ai_report", ""))
 
-        if w_res.get("all_pages"):
-            st.divider()
-            st.markdown("### 🗂 Page-by-Page Audit Table")
-            rows = [
-                {
-                    "URL": p["url"],
-                    "Status": p.get("status", "—"),
-                    "Load Time (ms)": p.get("load_time_ms", "—"),
-                    "Title": (p.get("title") or "Missing Title")[:40],
-                    "H1 Heading": "✅ Present" if p.get("has_h1") else "❌ Missing",
-                    "Missing ALT Tags": p.get("missing_alt_count", 0),
-                    "SSL/HTTPS": "🔒 Yes" if p.get("is_https") else "⚠️ No",
-                    "Result": "🔴 Broken" if p.get("broken") else "🟢 OK"
-                }
-                for p in w_res["all_pages"]
-            ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, height=280)
-
         st.divider()
         from agents.website_testing_agent import generate_website_pdf_report
-        pdf_bytes = generate_website_pdf_report(w_url.strip(), summary, w_res.get("ai_report", ""))
-        st.download_button("📥 Download PDF Web Audit Report", data=pdf_bytes, file_name=f"Website_Audit_Report.pdf", mime="application/pdf", use_container_width=True)
+        target_u = w_res.get("summary", {}).get("url") or st.session_state.get("web_page_url", "Website")
+        pdf_bytes = generate_website_pdf_report(target_u, summary, w_res.get("ai_report", ""))
+        st.download_button("📥 Download Comprehensive PDF Web Audit Report", data=pdf_bytes, file_name=f"Real_Browser_Website_Audit_Report.pdf", mime="application/pdf", use_container_width=True)
+

@@ -1,48 +1,33 @@
 """
 Website Testing Agent for DeptOps AI
 ------------------------------------
-Automated Website Audit & NAAC Readiness Inspector.
+Automated Real-Browser Website Crawler & Diagnostic Engine.
 
-Performs multi-category website testing starting from a single URL:
-A. Basic Testing (Reachability, HTTP status, HTTPS/SSL, Redirects, Response Time, DNS Lookup)
-B. Link Testing (Broken links, Internal/External links, Redirect loops, Missing pages)
-C. SEO Testing (Title, Meta Description, H1/H2, Robots.txt, Sitemap.xml, Canonical URL, Open Graph, Twitter Cards)
-D. Accessibility (Missing ALT tags, Form labels, Heading hierarchy, Accessibility score)
-E. Performance (Page Load Time, Slow resources, CSS/JS size, Compression, Cache headers)
-F. Security (Security headers: HSTS, CSP, X-Frame-Options, XSS protection, Clickjacking, Mixed Content)
-G. Content Validation (Missing images/CSS/JS, Empty pages, Duplicate titles)
-H. Website Structure (Navigation tree, Total pages, images, PDFs, forms)
-
-Generates:
-- Overall Website Health Score (0-100)
-- Category Scores (Performance, SEO, Accessibility, Security)
-- OpenRouter free-model AI recommendations
-- Downloadable PDF Audit Report
+Uses Playwright Headless Browser to:
+1. Discover all reachable internal pages (including JavaScript-rendered links and SPA routes).
+2. Visit every discovered page and verify page open success.
+3. Detect HTTP errors (4xx/5xx), broken pages, navigation timeouts, frontend JS runtime errors,
+   and failed network/API requests.
+4. Generate a clear report detailing total pages found, working pages, broken pages, and exact failure reasons.
 """
 
 import io
 import time
 import socket
 import ssl
-import requests
-from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
 import logging
+from urllib.parse import urljoin, urlparse
+from playwright.sync_api import sync_playwright
 
 from config import invoke_openrouter_free_models
 
 logger = logging.getLogger("WebsiteTestingAgent")
 
-SLOW_THRESHOLD_MS = 3000
-MAX_CRAWL_PAGES = 15
-REQUEST_TIMEOUT = 10
+MAX_CRAWL_PAGES = 50
+PAGE_TIMEOUT_MS = 15000
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DeptOpsAI-WebsiteAuditor/2.5"
-}
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DeptOpsAI-RealBrowserTester/3.0"
 
-
-# ── Category A: Basic & Security Testing Functions ────────────────────────────
 
 def check_dns(domain: str) -> bool:
     try:
@@ -63,274 +48,227 @@ def check_ssl(domain: str) -> dict:
         return {"valid": False, "error": str(exc)}
 
 
-def check_robots_and_sitemap(base_url: str) -> dict:
-    robots_url = urljoin(base_url, "/robots.txt")
-    sitemap_url = urljoin(base_url, "/sitemap.xml")
+def audit_single_page_with_playwright(browser, url: str, base_domain: str, timeout_ms: int = PAGE_TIMEOUT_MS) -> dict:
+    """Visits a single page using a real Playwright browser context, tracking JS errors and network failures."""
+    context = browser.new_context(user_agent=USER_AGENT, ignore_https_errors=True)
+    page = context.new_page()
 
-    res = {"has_robots": False, "has_sitemap": False}
+    failure_reasons = []
+    js_errors = []
+    failed_network_requests = []
+    status_code = None
+    page_title = None
+    discovered_links = set()
+
+    # Listeners for JS runtime errors and console logs
+    page.on("pageerror", lambda err: js_errors.append(f"Uncaught Exception: {str(err)}"))
+    page.on("console", lambda msg: js_errors.append(f"Console Error: {msg.text}") if msg.type == "error" else None)
+
+    # Listeners for failed network requests and HTTP 4xx/5xx sub-resources
+    def handle_request_failed(req):
+        err = req.failure.error_text if req.failure else "Network Request Failed"
+        failed_network_requests.append(f"{req.method} {req.url} — {err}")
+
+    def handle_response(resp):
+        if resp.status >= 400 and not resp.url.startswith("data:"):
+            failed_network_requests.append(f"HTTP {resp.status} on {resp.request.method} {resp.url}")
+
+    page.on("requestfailed", handle_request_failed)
+    page.on("response", handle_response)
+
+    start_time = time.time()
     try:
-        r = requests.get(robots_url, headers=HEADERS, timeout=5)
-        res["has_robots"] = r.status_code == 200
-    except Exception:
-        pass
+        response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        load_time_ms = int((time.time() - start_time) * 1000)
+        if response:
+            status_code = response.status
+        else:
+            status_code = 0
+    except Exception as exc:
+        load_time_ms = int((time.time() - start_time) * 1000)
+        err_msg = str(exc)
+        if "Timeout" in err_msg or "timeout" in err_msg:
+            failure_reasons.append(f"Navigation Timeout: Page load exceeded {timeout_ms}ms limit")
+        else:
+            failure_reasons.append(f"Page Load Crash: {err_msg[:180]}")
+        status_code = 0
 
-    try:
-        s = requests.get(sitemap_url, headers=HEADERS, timeout=5)
-        res["has_sitemap"] = s.status_code == 200
-    except Exception:
-        pass
+    # Evaluate HTTP Status Code
+    if status_code and status_code >= 400:
+        failure_reasons.append(f"HTTP Error {status_code}: Main page returned HTTP status {status_code}")
 
-    return res
+    if status_code is not None and status_code < 400 and not failure_reasons:
+        try:
+            page_title = page.title()
+        except Exception:
+            page_title = "Untitled Page"
 
+        # Extract reachable internal links & JS routes rendered in the DOM
+        try:
+            hrefs = page.eval_on_selector_all("a[href]", "elements => elements.map(e => e.getAttribute('href'))")
+            for h in hrefs:
+                if not h:
+                    continue
+                h_str = str(h).strip()
+                if h_str.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+                full_url = urljoin(url, h_str).split("#")[0].strip()
+                parsed = urlparse(full_url)
+                if parsed.scheme in ("http", "https"):
+                    # Check if domain matches base domain
+                    if parsed.netloc == base_domain or parsed.netloc == f"www.{base_domain}" or base_domain == f"www.{parsed.netloc}":
+                        norm_url = full_url.rstrip("/") if len(parsed.path) > 1 else full_url
+                        discovered_links.add(norm_url)
+        except Exception as exc:
+            logger.warning(f"Error extracting links from {url}: {exc}")
 
-# ── Single Page Full Audit (Categories A-H) ───────────────────────────────────
+    # Append recorded frontend JS errors and failed network requests to failure reasons
+    for js_err in js_errors:
+        failure_reasons.append(f"Frontend JS Error: {js_err}")
+    for net_err in failed_network_requests:
+        failure_reasons.append(f"Failed Network/API Request: {net_err}")
 
-def audit_single_page(url: str, base_domain: str) -> dict:
-    result = {
+    context.close()
+
+    is_broken = len(failure_reasons) > 0
+
+    return {
         "url": url,
-        "status": None,
-        "load_time_ms": None,
-        "broken": False,
-        "is_https": url.startswith("https://"),
-        "error": None,
-        # SEO
-        "title": None,
-        "meta_desc": None,
-        "has_h1": False,
-        "h2_count": 0,
-        "canonical": None,
-        "has_og": False,
-        "has_twitter_card": False,
-        "has_structured_data": False,
-        # Accessibility
-        "missing_alt_count": 0,
-        "total_images": 0,
-        "missing_form_labels": 0,
-        "total_forms": 0,
-        # Performance & Resources
-        "css_count": 0,
-        "js_count": 0,
-        "pdf_count": 0,
-        "has_compression": False,
-        "cache_control": None,
-        # Security
-        "security_headers": {},
-        "has_hsts": False,
-        "has_csp": False,
-        "has_xframe": False,
-        # Links
-        "internal_links": [],
-        "external_links": [],
+        "status": status_code,
+        "load_time_ms": load_time_ms,
+        "title": page_title or "Untitled Page",
+        "broken": is_broken,
+        "failure_reasons": failure_reasons,
+        "internal_links": list(discovered_links),
+        "js_errors_count": len(js_errors),
+        "failed_requests_count": len(failed_network_requests),
     }
 
-    start = time.time()
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-        elapsed_ms = int((time.time() - start) * 1000)
-        result["status"] = resp.status_code
-        result["load_time_ms"] = elapsed_ms
 
-        if resp.status_code >= 400:
-            result["broken"] = True
-            return result
-
-        # Check response headers for compression & security
-        h = resp.headers
-        result["has_compression"] = "gzip" in h.get("content-encoding", "") or "br" in h.get("content-encoding", "")
-        result["cache_control"] = h.get("cache-control")
-
-        result["has_hsts"] = "strict-transport-security" in h
-        result["has_csp"] = "content-security-policy" in h
-        result["has_xframe"] = "x-frame-options" in h
-        result["security_headers"] = {
-            "hsts": result["has_hsts"],
-            "csp": result["has_csp"],
-            "x_frame_options": result["has_xframe"],
-            "x_content_type_options": "x-content-type-options" in h
-        }
-
-        # Parse HTML content using BeautifulSoup
-        ct = h.get("content-type", "")
-        if "html" in ct:
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            # SEO
-            result["title"] = soup.title.string.strip() if soup.title and soup.title.string else None
-            m_desc = soup.find("meta", attrs={"name": "description"})
-            result["meta_desc"] = m_desc["content"].strip() if m_desc and m_desc.get("content") else None
-            result["has_h1"] = len(soup.find_all("h1")) > 0
-            result["h2_count"] = len(soup.find_all("h2"))
-            can = soup.find("link", attrs={"rel": "canonical"})
-            result["canonical"] = can["href"] if can and can.get("href") else None
-
-            result["has_og"] = len(soup.find_all("meta", property=re.compile(r"^og:"))) > 0
-            result["has_twitter_card"] = len(soup.find_all("meta", attrs={"name": re.compile(r"^twitter:")})) > 0
-            result["has_structured_data"] = len(soup.find_all("script", type="application/ld+json")) > 0
-
-            # Accessibility & Images
-            imgs = soup.find_all("img")
-            result["total_images"] = len(imgs)
-            result["missing_alt_count"] = sum(1 for img in imgs if not img.get("alt"))
-
-            # Forms & Labels
-            forms = soup.find_all("form")
-            result["total_forms"] = len(forms)
-            inputs = soup.find_all(["input", "select", "textarea"])
-            result["missing_form_labels"] = sum(1 for i in inputs if not i.get("aria-label") and not i.get("id"))
-
-            # Resources & PDFs
-            result["css_count"] = len(soup.find_all("link", rel="stylesheet"))
-            result["js_count"] = len(soup.find_all("script", src=True))
-            result["pdf_count"] = len([a for a in soup.find_all("a", href=True) if a["href"].endswith(".pdf")])
-
-            # Links
-            for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
-                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
-                    continue
-                full = urljoin(url, href).split("#")[0]
-                parsed = urlparse(full)
-                if parsed.scheme in ("http", "https"):
-                    if parsed.netloc == base_domain:
-                        result["internal_links"].append(full)
-                    else:
-                        result["external_links"].append(full)
-
-    except Exception as exc:
-        result["broken"] = True
-        result["error"] = str(exc)[:200]
-
-    return result
-
-
-# ── Full Website Crawler & Multi-Category Audit Engine ───────────────────────
-
-def run_website_audit(target_url: str) -> dict:
+def run_website_audit(target_url: str, max_pages: int = MAX_CRAWL_PAGES) -> dict:
+    """Crawls all reachable internal pages of a website using Playwright real browser."""
     if not target_url.startswith(("http://", "https://")):
         target_url = "https://" + target_url
 
     parsed_target = urlparse(target_url)
     base_domain = parsed_target.netloc
 
-    # Basic checks
     dns_ok = check_dns(base_domain)
     ssl_info = check_ssl(base_domain) if target_url.startswith("https://") else {"valid": False}
-    robots_sitemap = check_robots_and_sitemap(target_url)
 
-    # Crawl internal pages
     pages = []
-    queue = [target_url]
+    working_pages = []
+    broken_pages = []
+
+    to_visit = [target_url]
     visited = set()
 
-    while queue and len(visited) < MAX_CRAWL_PAGES:
-        curr_url = queue.pop(0)
-        if curr_url in visited:
-            continue
-        visited.add(curr_url)
+    logger.info(f"Starting real browser audit for {target_url}")
 
-        audit_res = audit_single_page(curr_url, base_domain)
-        pages.append(audit_res)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                while to_visit and len(visited) < max_pages:
+                    curr_url = to_visit.pop(0)
+                    parsed_curr = urlparse(curr_url)
+                    norm_curr = curr_url.rstrip("/") if len(parsed_curr.path) > 1 else curr_url
+                    if norm_curr in visited:
+                        continue
+                    visited.add(norm_curr)
 
-        # Queue internal links
-        if not audit_res["broken"]:
-            for link in audit_res["internal_links"]:
-                if link not in visited and link not in queue:
-                    queue.append(link)
+                    audit_res = audit_single_page_with_playwright(browser, curr_url, base_domain)
+                    pages.append(audit_res)
 
-    # Calculate Category & Health Scores (0-100)
-    total_p = len(pages)
-    broken_p = sum(1 for p in pages if p["broken"])
-    slow_p = sum(1 for p in pages if p.get("load_time_ms") and p["load_time_ms"] > SLOW_THRESHOLD_MS)
+                    if audit_res["broken"]:
+                        broken_pages.append(audit_res)
+                    else:
+                        working_pages.append(audit_res)
 
-    # 1. Performance Score
-    avg_load = sum(p.get("load_time_ms", 0) for p in pages if p.get("load_time_ms")) / max(total_p, 1)
-    perf_score = max(0, min(100, int(100 - (slow_p / max(total_p, 1) * 40) - (avg_load / 100))))
+                    # Queue newly discovered internal links
+                    for link in audit_res["internal_links"]:
+                        parsed_link = urlparse(link)
+                        norm_link = link.rstrip("/") if len(parsed_link.path) > 1 else link
+                        if norm_link not in visited and norm_link not in [u.rstrip("/") for u in to_visit]:
+                            to_visit.append(link)
+            finally:
+                browser.close()
+    except Exception as exc:
+        logger.error(f"Playwright browser crawling error: {exc}")
 
-    # 2. SEO Score
-    seo_pass = sum(1 for p in pages if p.get("title") and p.get("meta_desc") and p.get("has_h1"))
-    seo_score = max(0, min(100, int((seo_pass / max(total_p, 1) * 80) + (20 if robots_sitemap["has_sitemap"] else 0))))
+    total_found = len(pages)
+    total_working = len(working_pages)
+    total_broken = len(broken_pages)
 
-    # 3. Accessibility Score
-    acc_pass = sum(1 for p in pages if p.get("missing_alt_count", 0) == 0)
-    acc_score = max(0, min(100, int((acc_pass / max(total_p, 1)) * 100)))
-
-    # 4. Security Score
-    sec_pass = sum(1 for p in pages if p.get("has_hsts") and p.get("has_csp") and p.get("has_xframe"))
-    sec_score = max(0, min(100, int((sec_pass / max(total_p, 1) * 70) + (30 if ssl_info.get("valid") else 0))))
-
-    # Overall Health Score
-    overall_health = int((perf_score * 0.25) + (seo_score * 0.25) + (acc_score * 0.25) + (sec_score * 0.25))
+    health_score = max(0, min(100, int((total_working / max(total_found, 1)) * 100)))
 
     scores = {
-        "overall": overall_health,
-        "performance": perf_score,
-        "seo": seo_score,
-        "accessibility": acc_score,
-        "security": sec_score,
+        "overall": health_score,
+        "working_percentage": health_score,
+        "performance": max(0, min(100, int(100 - (total_broken * 15)))),
+        "reliability": health_score,
     }
 
-    summary = {
+    return {
         "url": target_url,
         "domain": base_domain,
         "dns_valid": dns_ok,
         "ssl_valid": ssl_info.get("valid", False),
-        "has_robots": robots_sitemap["has_robots"],
-        "has_sitemap": robots_sitemap["has_sitemap"],
-        "total_pages_crawled": total_p,
-        "broken_pages_count": broken_p,
-        "slow_pages_count": slow_p,
+        "total_pages_found": total_found,
+        "total_working": total_working,
+        "total_broken": total_broken,
+        "working_pages": working_pages,
+        "broken_pages": broken_pages,
+        "all_pages": pages,
         "scores": scores,
-        "pages": pages,
     }
 
-    return summary
-
-
-# ── AI Report & Recommendations Generator (OpenRouter Free Models) ────────────
 
 def generate_ai_website_report(summary: dict) -> str:
     url = summary["url"]
     scores = summary["scores"]
+    total_found = summary["total_pages_found"]
+    total_working = summary["total_working"]
+    total_broken = summary["total_broken"]
+    broken_pages = summary["broken_pages"]
+
+    broken_summary_text = ""
+    for bp in broken_pages[:10]:  # Highlight top broken pages
+        reasons = "; ".join(bp.get("failure_reasons", []))
+        broken_summary_text += f"- Page `{bp['url']}`: {reasons}\n"
 
     prompt = (
-        f"You are the senior NAAC Website Audit Agent for DeptOps AI.\n"
-        f"Analyze the following automated website inspection results for department website `{url}` and generate an executive NAAC readiness audit report.\n\n"
-        f"Scores (0-100):\n"
-        f"- Overall Health Score: {scores['overall']}/100\n"
-        f"- Performance Score: {scores['performance']}/100\n"
-        f"- SEO Score: {scores['seo']}/100\n"
-        f"- Accessibility Score: {scores['accessibility']}/100\n"
-        f"- Security Score: {scores['security']}/100\n\n"
+        f"You are the Senior Web Quality & NAAC Audit Inspector for DeptOps AI.\n"
+        f"Analyze the real-browser website crawl results for `{url}`:\n\n"
         f"Key Metrics:\n"
-        f"- Pages Crawled: {summary['total_pages_crawled']}\n"
-        f"- Broken Pages: {summary['broken_pages_count']}\n"
-        f"- Slow Pages (>3s): {summary['slow_pages_count']}\n"
-        f"- SSL Valid: {summary['ssl_valid']}, Sitemap: {summary['has_sitemap']}\n\n"
-        f"Provide:\n"
-        f"1. Executive NAAC Inspection Summary\n"
-        f"2. Critical Fixes Needed (Broken links, security headers, ALT tags, response times)\n"
-        f"3. Specific Actionable Steps to ensure 100% compliance during accreditation review."
+        f"- Total Internal Pages Discovered & Crawled: {total_found}\n"
+        f"- Working Pages: {total_working}\n"
+        f"- Broken Pages: {total_broken}\n"
+        f"- Health Score: {scores['overall']}/100\n"
+        f"- SSL Valid: {summary.get('ssl_valid')}, DNS Valid: {summary.get('dns_valid')}\n\n"
+        f"Broken Pages Breakdown:\n"
+        f"{broken_summary_text if broken_summary_text else 'No broken pages found! All pages opened successfully.'}\n\n"
+        f"Provide a clear executive summary report detailing:\n"
+        f"1. Executive Audit Summary\n"
+        f"2. Root Cause Analysis of Broken Pages, Frontend JS Errors, Timeouts, & Network Failures\n"
+        f"3. Concrete Actionable Fixes for Developers to ensure 100% reachability & reliability."
     )
 
     try:
         return invoke_openrouter_free_models(prompt, temperature=0.2)
     except Exception as exc:
-        logger.error(f"OpenRouter free-model fallback failed for Website Testing Agent: {exc}")
+        logger.error(f"OpenRouter report generation fallback: {exc}")
         return (
             f"### 🌐 Website Audit Report — `{url}`\n\n"
-            f"**Overall Health Score:** {scores['overall']}/100\n"
-            f"- **Performance:** {scores['performance']}/100\n"
-            f"- **SEO:** {scores['seo']}/100\n"
-            f"- **Accessibility:** {scores['accessibility']}/100\n"
-            f"- **Security:** {scores['security']}/100\n\n"
-            f"**Crawled Pages:** {summary['total_pages_crawled']} | **Broken:** {summary['broken_pages_count']} | **Slow:** {summary['slow_pages_count']}"
+            f"- **Total Reachable Pages Discovered:** {total_found}\n"
+            f"- **Working Pages:** {total_working} 🟢\n"
+            f"- **Broken Pages:** {total_broken} 🔴\n"
+            f"- **Overall Health Score:** {scores['overall']}/100\n"
         )
 
 
-# ── PDF Audit Report Generator ───────────────────────────────────────────────
-
 def generate_website_pdf_report(url: str, summary: dict, ai_report: str) -> bytes:
-    """Generates a downloadable PDF report for NAAC web compliance."""
+    """Generates a downloadable PDF report detailing website crawl results."""
     try:
         from reportlab.lib.pagesizes import letter
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -350,22 +288,26 @@ def generate_website_pdf_report(url: str, summary: dict, ai_report: str) -> byte
         )
 
         scores = summary.get("scores", {})
+        total_found = summary.get("total_pages_found", 0)
+        total_working = summary.get("total_working", 0)
+        total_broken = summary.get("total_broken", 0)
+
         elements = [
-            Paragraph("🌐 DeptOps AI — Website Audit Report", title_style),
+            Paragraph("🌐 DeptOps AI — Real-Browser Website Audit Report", title_style),
             Paragraph(f"<b>Target URL:</b> {url} | <b>Health Score:</b> {scores.get('overall', 0)}/100", body_style),
             Spacer(1, 10),
-            Paragraph("<b>Category Health Scores:</b>", styles['Heading2']),
+            Paragraph("<b>Crawl & Audit Metrics:</b>", styles['Heading2']),
             Spacer(1, 6),
         ]
 
-        score_table = [
-            ["Category", "Score", "Status"],
-            ["Performance", f"{scores.get('performance',0)}/100", "Good" if scores.get('performance',0)>=70 else "Needs Fix"],
-            ["SEO", f"{scores.get('seo',0)}/100", "Good" if scores.get('seo',0)>=70 else "Needs Fix"],
-            ["Accessibility", f"{scores.get('accessibility',0)}/100", "Good" if scores.get('accessibility',0)>=70 else "Needs Fix"],
-            ["Security", f"{scores.get('security',0)}/100", "Good" if scores.get('security',0)>=70 else "Needs Fix"],
+        metrics_table = [
+            ["Metric", "Value", "Status"],
+            ["Total Internal Pages Found", str(total_found), "Scanned"],
+            ["Working Pages", str(total_working), "Pass 🟢"],
+            ["Broken Pages", str(total_broken), "Needs Fix 🔴" if total_broken > 0 else "Clean 🟢"],
+            ["Overall Health Score", f"{scores.get('overall', 0)}%", "Good" if scores.get('overall', 0) >= 80 else "Attention Needed"],
         ]
-        t = Table(score_table, colWidths=[150, 100, 150])
+        t = Table(metrics_table, colWidths=[180, 100, 140])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0f9d8a')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -375,9 +317,39 @@ def generate_website_pdf_report(url: str, summary: dict, ai_report: str) -> byte
         elements.append(t)
         elements.append(Spacer(1, 14))
 
-        elements.append(Paragraph("<b>AI Recommendations & NAAC Fixes:</b>", styles['Heading2']))
+        if summary.get("broken_pages"):
+            elements.append(Paragraph("<b>Broken Pages & Failure Reasons:</b>", styles['Heading2']))
+            elements.append(Spacer(1, 6))
+            broken_data = [["URL", "Status", "Failure Reasons"]]
+            for bp in summary["broken_pages"]:
+                reasons_str = "<br/>".join(bp.get("failure_reasons", []))
+                broken_data.append([
+                    Paragraph(bp["url"], body_style),
+                    str(bp.get("status", "Error")),
+                    Paragraph(reasons_str, body_style)
+                ])
+            bt = Table(broken_data, colWidths=[160, 60, 200])
+            bt.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#d9534f')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ]))
+            elements.append(bt)
+            elements.append(Spacer(1, 14))
+
+        elements.append(Paragraph("<b>AI Recommendations & Developer Fixes:</b>", styles['Heading2']))
         elements.append(Spacer(1, 6))
-        elements.append(Paragraph(ai_report.replace("\n", "<br/>"), body_style))
+
+        # Safely split and sanitize lines for ReportLab Paragraph compatibility
+        clean_report = ai_report.replace("<br>", "\n").replace("<br/>", "\n")
+        for line in clean_report.split("\n"):
+            line_str = line.strip()
+            if not line_str:
+                elements.append(Spacer(1, 4))
+                continue
+            # Escaping XML special characters so ReportLab doesn't fail on raw markdown/HTML tags
+            safe_line = line_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            elements.append(Paragraph(safe_line, body_style))
 
         doc.build(elements)
         return buffer.getvalue()
@@ -393,7 +365,6 @@ def run_website_testing_agent(url: str, username: str = "hod") -> dict:
     summary = run_website_audit(url)
     ai_report = generate_ai_website_report(summary)
 
-    # Save to PostgreSQL scan history
     try:
         from db_storage import save_website_scan
         save_website_scan(
@@ -410,5 +381,10 @@ def run_website_testing_agent(url: str, username: str = "hod") -> dict:
         "summary": summary,
         "ai_report": ai_report,
         "scores": summary["scores"],
-        "all_pages": summary["pages"]
+        "all_pages": summary["all_pages"],
+        "working_pages": summary["working_pages"],
+        "broken_pages": summary["broken_pages"],
+        "total_pages_found": summary["total_pages_found"],
+        "total_working": summary["total_working"],
+        "total_broken": summary["total_broken"],
     }
