@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from auth import _get_user, _verify
+from api_client import signin
 from auth_styles import AUTH_CSS
 
 
@@ -25,14 +25,14 @@ def render_signin_page():
             if not username or not password:
                 st.error("Please fill in all fields.")
             else:
-                row = _get_user(username.strip())
-                if row and _verify(password, row[2]):
+                try:
+                    res = signin(username.strip(), password)
                     st.session_state.authenticated = True
-                    st.session_state.username = row[0]
-                    st.session_state.full_name = row[1] or row[0]
+                    st.session_state.username = res.get("username")
+                    st.session_state.full_name = res.get("full_name")
                     st.rerun()
-                else:
-                    st.error("Invalid username or password.")
+                except Exception as exc:
+                    st.error(f"Invalid username or password. ({exc})")
 
     st.markdown('<div class="auth-link">Don\'t have an account?</div>', unsafe_allow_html=True)
     if st.button("Create account", use_container_width=True, key="go_to_signup"):

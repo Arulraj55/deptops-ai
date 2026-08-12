@@ -19,6 +19,23 @@ except ImportError as e:
 
 from auth import auth_gate
 import db_storage
+from api_client import (
+    upload_analytics,
+    list_analytics,
+    upload_knowledge,
+    list_knowledge,
+    chunk_count as api_chunk_count,
+    reindex as api_reindex,
+    ask_analytics as api_ask_analytics,
+    analytics_full as api_analytics_full,
+    excel_report as api_excel_report,
+    pdf_report as api_pdf_report,
+    ask_knowledge as api_ask_knowledge,
+    criterion_summary as api_criterion_summary,
+    website_audit as api_website_audit,
+    website_pdf_report as api_website_pdf_report,
+    compare_datasets,
+)
 
 logger = logging.getLogger("DeptOpsAI-App")
 
@@ -218,7 +235,11 @@ def _profile_initials(name: str) -> str:
 @st.cache_data(ttl=30, show_spinner=False)
 def get_datasets(user: str) -> list[str]:
     try:
-        return [row["filename"] for row in db_storage.list_analytics_files(user)]
+        rows = list_analytics(user)
+        # `list_analytics` returns list of dicts with filename keys or simple list
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            return [r.get("filename") for r in rows]
+        return list(rows or [])
     except Exception:
         return []
 
@@ -226,7 +247,7 @@ def get_datasets(user: str) -> list[str]:
 @st.cache_data(ttl=30, show_spinner=False)
 def get_doc_list(user: str) -> list[str]:
     try:
-        return db_storage.list_knowledge_files(user)
+        return list_knowledge(user)
     except Exception:
         return []
 
@@ -234,11 +255,7 @@ def get_doc_list(user: str) -> list[str]:
 @st.cache_data(ttl=30, show_spinner=False)
 def get_chunk_count(user: str) -> int:
     try:
-        raw = db_storage.load_tfidf_index(user)
-        if not raw:
-            return 0
-        idx = json.loads(raw)
-        return len(idx.get("chunks", []))
+        return api_chunk_count(user)
     except Exception:
         return 0
 
@@ -304,12 +321,15 @@ with st.sidebar:
         st.caption("Excel / CSV → Analytics Agent")
         up_csv = st.file_uploader("", type=["csv", "xlsx", "xls"], key="up_csv", label_visibility="collapsed")
         if up_csv and st.session_state.get("_last_uploaded_csv") != up_csv.name:
-            db_storage.save_analytics_file(username, up_csv.name, up_csv.getbuffer().tobytes())
-            st.success(f"✅ Saved `{up_csv.name}`")
-            get_datasets.clear()
-            st.session_state["_last_uploaded_csv"] = up_csv.name
-            st.session_state.nav_page = "analytics"
-            st.rerun()
+            try:
+                upload_analytics(username, up_csv.name, up_csv.getbuffer().tobytes())
+                st.success(f"✅ Saved `{up_csv.name}`")
+                get_datasets.clear()
+                st.session_state["_last_uploaded_csv"] = up_csv.name
+                st.session_state.nav_page = "analytics"
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Upload failed: {exc}")
 
     st.markdown('<div style="height: 8px;"></div>', unsafe_allow_html=True)
 
@@ -319,12 +339,15 @@ with st.sidebar:
         st.caption("PDF / DOCX / TXT / MD → Knowledge Base")
         up_doc = st.file_uploader("", type=["pdf", "docx", "txt", "md"], key="up_doc", label_visibility="collapsed")
         if up_doc and st.session_state.get("_last_uploaded_doc") != up_doc.name:
-            db_storage.save_knowledge_file(username, up_doc.name, up_doc.getbuffer().tobytes())
-            st.success(f"✅ Saved `{up_doc.name}`")
-            get_doc_list.clear()
-            st.session_state["_last_uploaded_doc"] = up_doc.name
-            st.session_state.nav_page = "knowledge"
-            st.rerun()
+            try:
+                upload_knowledge(username, up_doc.name, up_doc.getbuffer().tobytes())
+                st.success(f"✅ Saved `{up_doc.name}`")
+                get_doc_list.clear()
+                st.session_state["_last_uploaded_doc"] = up_doc.name
+                st.session_state.nav_page = "knowledge"
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Upload failed: {exc}")
 
         docs = get_doc_list(username)
         chunks = get_chunk_count(username)
@@ -334,13 +357,15 @@ with st.sidebar:
 
         if st.button("🔄 Re-index Knowledge Base", use_container_width=True, type="secondary"):
             with st.spinner("Indexing documents..."):
-                from agents.knowledge_agent import ingest_documents
-                res = ingest_documents(username)
-                get_chunk_count.clear()
-            if res["success"]:
-                st.success(res["message"])
-            else:
-                st.error(res["message"])
+                try:
+                    res = api_reindex(username)
+                    get_chunk_count.clear()
+                    if res.get("success"):
+                        st.success(res.get("message", "Re-index complete"))
+                    else:
+                        st.error(res.get("message", "Re-index failed"))
+                except Exception as exc:
+                    st.error(f"Re-index failed: {exc}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -369,15 +394,15 @@ if st.session_state.nav_page == "coordinator":
         with st.spinner(f"Crawling and auditing {quick_url}..."):
             progress_bar = st.progress(0, text="Initializing crawl...")
             for p in range(20, 100, 20):
-                time_step = 0.2
                 progress_bar.progress(p, text=f"Auditing web pages... ({p}%)")
-            from agents.website_testing_agent import run_website_testing_agent
-            web_res = run_website_testing_agent(quick_url.strip(), username=username)
-            progress_bar.progress(100, text="Audit Complete!")
-
-        st.session_state.web_page_result = web_res
-        st.session_state.nav_page = "website"
-        st.rerun()
+            try:
+                web_res = api_website_audit(quick_url.strip(), username=username)
+                progress_bar.progress(100, text="Audit Complete!")
+                st.session_state.web_page_result = web_res
+                st.session_state.nav_page = "website"
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Website audit failed: {exc}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -393,12 +418,38 @@ elif st.session_state.nav_page == "analytics":
         sel_ds = st.selectbox("📂 Select Academic Dataset to Analyze", all_ds, key="ana_page_ds")
 
         with st.spinner("Analyzing dataset dimensions & stats..."):
-            from agents.analytics_agent import ask_analytics_agent, generate_excel_summary, generate_pdf_report
-            res = ask_analytics_agent(username, query="Full dataset statistical summary and NAAC insights", filename=sel_ds)
+            try:
+                res = api_analytics_full(username, sel_ds)
+            except Exception as exc:
+                st.error(f"Analytics failed: {exc}")
+                res = {}
 
-        df = res.get("dataframe")
+        # Build a dataframe preview from the lightweight preview payload
+        preview = res.get("preview", [])
+        df = pd.DataFrame(preview) if preview else None
         stats = res.get("stats", {})
-        charts = res.get("charts", [])
+        chart_data = res.get("chart_data", [])
+
+        # Convert chart_data to plotly figures for display
+        charts = []
+        try:
+            for ch in chart_data:
+                t = ch.get("type")
+                if t == "bar":
+                    fig = px.bar(x=ch.get("x", []), y=ch.get("y", []), labels={"x": ch.get("x_label"), "y": ch.get("y_label")}, title=ch.get("title"))
+                elif t == "pie":
+                    fig = px.pie(names=ch.get("labels", []), values=ch.get("values", []), title=ch.get("title"))
+                elif t == "line":
+                    fig = px.line(x=ch.get("x", []), y=ch.get("y", []), labels={"x": ch.get("x_label"), "y": ch.get("y_label")}, title=ch.get("title"))
+                elif t == "histogram":
+                    fig = px.histogram(x=ch.get("values", []), nbins=20, title=ch.get("title"))
+                elif t == "scatter":
+                    fig = px.scatter(x=ch.get("x", []), y=ch.get("y", []), labels={"x": ch.get("x_label"), "y": ch.get("y_label")}, title=ch.get("title"))
+                else:
+                    continue
+                charts.append({"fig": fig})
+        except Exception:
+            charts = []
 
         # Metadata Header
         if df is not None:
@@ -428,9 +479,12 @@ elif st.session_state.nav_page == "analytics":
         nl_q = st.text_input("Ask a question about this dataset (e.g. 'How many students in CSE department?', 'Highest CGPA', 'Compare placements'):", key="ana_nl_q")
         if st.button("Analyze with OpenRouter AI ⚡", type="primary", key="go_ana_nl") and nl_q.strip():
             with st.spinner("OpenRouter free model analyzing dataset..."):
-                nl_res = ask_analytics_agent(username, query=nl_q.strip(), filename=sel_ds)
-                st.session_state["ana_nl_answer"] = nl_res.get("answer", "")
-                st.session_state["ana_nl_q_last"] = nl_q.strip()
+                try:
+                    nl_res = api_ask_analytics(username, nl_q.strip(), sel_ds)
+                    st.session_state["ana_nl_answer"] = nl_res.get("answer", "")
+                    st.session_state["ana_nl_q_last"] = nl_q.strip()
+                except Exception as exc:
+                    st.error(f"Analysis failed: {exc}")
 
         if "ana_nl_answer" in st.session_state:
             st.markdown(f"#### 🤖 Answer to: *\"{st.session_state.get('ana_nl_q_last', '')}\"*")
@@ -442,14 +496,20 @@ elif st.session_state.nav_page == "analytics":
         d_col1, d_col2 = st.columns(2)
         with d_col1:
             if df is not None:
-                excel_bytes = generate_excel_summary(df, stats)
-                st.download_button("📥 Download Excel Summary", data=excel_bytes, file_name=f"{sel_ds}_summary.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                try:
+                    excel_bytes = api_excel_report(username, sel_ds)
+                    st.download_button("📥 Download Excel Summary", data=excel_bytes, file_name=f"{sel_ds}_summary.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                except Exception as exc:
+                    st.error(f"Failed to generate Excel: {exc}")
         with d_col2:
             if df is not None:
-                pdf_bytes = generate_pdf_report(username, sel_ds, res.get("answer", ""), stats)
-                st.download_button("📥 Download NAAC PDF Report", data=pdf_bytes, file_name=f"{sel_ds}_NAAC_report.pdf",
-                                   mime="application/pdf", use_container_width=True)
+                try:
+                    pdf_bytes = api_pdf_report(username, sel_ds)
+                    st.download_button("📥 Download NAAC PDF Report", data=pdf_bytes, file_name=f"{sel_ds}_NAAC_report.pdf",
+                                       mime="application/pdf", use_container_width=True)
+                except Exception as exc:
+                    st.error(f"Failed to generate PDF: {exc}")
 
         if len(all_ds) >= 2:
             st.divider()
@@ -461,10 +521,12 @@ elif st.session_state.nav_page == "analytics":
                 ds2 = st.selectbox("Select Comparison Dataset", [d for d in all_ds if d != ds1], key="cmp_ds2")
             if st.button("Compare Datasets ⚖️", key="go_ds_cmp", type="primary"):
                 with st.spinner(f"Comparing `{ds1}` vs `{ds2}`..."):
-                    from agents.analytics_agent import compare_datasets
-                    cmp_res = compare_datasets(username, ds1, ds2)
+                    try:
+                        cmp_res = compare_datasets(username, ds1, ds2)
+                    except Exception as exc:
+                        cmp_res = f"Comparison failed: {exc}"
                 with st.container(border=True):
-                    st.markdown(cmp_res)
+                    st.markdown(cmp_res.get("result") if isinstance(cmp_res, dict) else cmp_res)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -486,8 +548,10 @@ elif st.session_state.nav_page == "knowledge":
 
     if st.button("Search & Answer 🔍", type="primary", key="go_kb_q") and kb_q.strip():
         with st.spinner("Searching document vector store with OpenRouter free-model RAG..."):
-            from agents.knowledge_agent import ask_knowledge_agent
-            kb_res = ask_knowledge_agent(username, kb_q.strip())
+            try:
+                kb_res = api_ask_knowledge(username, kb_q.strip())
+            except Exception as exc:
+                kb_res = {"answer": f"Knowledge query failed: {exc}", "sources": [], "confidence_score": None}
 
         with st.container(border=True):
             st.markdown(kb_res.get("answer", ""))
@@ -519,8 +583,11 @@ elif st.session_state.nav_page == "knowledge":
     )
     if st.button("Generate Summary 📝", key="go_crit_sum", type="primary"):
         with st.spinner(f"Generating summary for Criterion {c_num}..."):
-            from agents.knowledge_agent import generate_criterion_summary
-            st.session_state["criterion_summary"] = generate_criterion_summary(username, c_num)
+            try:
+                res = api_criterion_summary(username, c_num)
+                st.session_state["criterion_summary"] = res.get("summary") if isinstance(res, dict) else res
+            except Exception as exc:
+                st.session_state["criterion_summary"] = f"Failed to generate summary: {exc}"
             st.session_state["criterion_summary_title"] = f"Criterion {c_num}: {criterion_names[c_num]}"
 
     if st.session_state.get("criterion_summary"):
@@ -545,10 +612,12 @@ elif st.session_state.nav_page == "website":
             prog = st.progress(0, text="Launching Playwright Chromium browser...")
             for val in range(20, 100, 20):
                 prog.progress(val, text=f"Discovering & inspecting JS routes and network requests... ({val}%)")
-            from agents.website_testing_agent import run_website_testing_agent
-            web_res = run_website_testing_agent(w_url.strip(), username=username)
-            prog.progress(100, text="Audit Complete!")
-            st.session_state.web_page_result = web_res
+            try:
+                web_res = api_website_audit(w_url.strip(), username=username)
+                prog.progress(100, text="Audit Complete!")
+                st.session_state.web_page_result = web_res
+            except Exception as exc:
+                st.error(f"Website audit failed: {exc}")
 
     if "web_page_result" in st.session_state:
         w_res = st.session_state.web_page_result
@@ -607,8 +676,11 @@ elif st.session_state.nav_page == "website":
             st.markdown(w_res.get("ai_report", ""))
 
         st.divider()
-        from agents.website_testing_agent import generate_website_pdf_report
         target_u = w_res.get("summary", {}).get("url") or st.session_state.get("web_page_url", "Website")
-        pdf_bytes = generate_website_pdf_report(target_u, summary, w_res.get("ai_report", ""))
-        st.download_button("📥 Download Comprehensive PDF Web Audit Report", data=pdf_bytes, file_name=f"Real_Browser_Website_Audit_Report.pdf", mime="application/pdf", use_container_width=True)
+        try:
+            pdf_bytes = api_website_pdf_report(target_u, username=username)
+            st.download_button("📥 Download Comprehensive PDF Web Audit Report", data=pdf_bytes, file_name=f"Real_Browser_Website_Audit_Report.pdf", mime="application/pdf", use_container_width=True)
+        except Exception:
+            # Fallback: no downloadable report available
+            pass
 

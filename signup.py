@@ -4,7 +4,7 @@ Allows HOD / Department Coordinators to create an account.
 """
 
 import streamlit as st
-from auth import _get_user, _create_user
+from api_client import signup
 from auth_styles import AUTH_CSS
 
 
@@ -33,19 +33,15 @@ def render_signup_page():
             elif len(password) < 4:
                 st.error("Password should be at least 4 characters long.")
             else:
-                existing = _get_user(username.strip())
-                if existing:
-                    st.error("Username already taken. Please choose another username.")
-                else:
-                    try:
-                        _create_user(username.strip(), full_name.strip(), password)
-                        st.success("Account created successfully! Auto-signing in...")
-                        st.session_state.authenticated = True
-                        st.session_state.username = username.strip()
-                        st.session_state.full_name = full_name.strip()
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Account creation failed: {exc}")
+                try:
+                    res = signup(username.strip(), full_name.strip(), password)
+                    st.success("Account created successfully! Auto-signing in...")
+                    st.session_state.authenticated = True
+                    st.session_state.username = res.get("username")
+                    st.session_state.full_name = res.get("full_name")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Account creation failed: {exc}")
 
     st.markdown('<div class="auth-link">Already have an account?</div>', unsafe_allow_html=True)
     if st.button("Sign in", use_container_width=True, key="go_to_signin"):

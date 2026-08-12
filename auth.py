@@ -12,6 +12,13 @@ from dotenv import load_dotenv
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# When running in frontend (Streamlit) mode, initialize the DB via the FastAPI
+# backend so the frontend doesn't need direct DB access.
+try:
+    from api_client import init_db as _remote_init_db
+except Exception:
+    _remote_init_db = None
+
 
 def _get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
@@ -137,7 +144,10 @@ def _verify(password: str, hashed: str) -> bool:
 def auth_gate():
     if not st.session_state.get("_db_ready"):
         try:
-            _init_db()
+            if _remote_init_db:
+                _remote_init_db()
+            else:
+                _init_db()
             st.session_state._db_ready = True
         except Exception as e:
             st.error(f"Database connection failed: {e}\n\nCheck DATABASE_URL in environment variables.")
